@@ -17,7 +17,10 @@ const DEF_POS = ["DL", "LB", "CB", "S", "DB", "EDGE"];
 const FONT_DISPLAY = "'Oswald', 'Arial Narrow', sans-serif";
 const FONT_BODY = "'Barlow', system-ui, sans-serif";
 
+// =================== ROOT ===================
 export default function PlayTracker() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [screen, setScreen] = useState("games");
   const [gamesIndex, setGamesIndex] = useState([]);
   const [activeId, setActiveId] = useState(null);
@@ -34,15 +37,35 @@ export default function PlayTracker() {
     setLoadingIndex(false);
   }, []);
 
-  useEffect(() => { loadIndex(); }, [loadIndex]);
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      setUser(user);
+      if (user) loadIndex();
+      setAuthLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        loadIndex();
+      } else {
+        setGamesIndex([]);
+        setScreen("games");
+        setActiveId(null);
+        setLoadingIndex(true);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, [loadIndex]);
 
   async function createGame(label) {
     const { data, error } = await supabase
       .from("games")
-      .insert({ label: label.trim() || "Untitled Game", plays: [] })
+      .insert({ label: label.trim() || "Untitled Game", plays: [], user_id: user.id })
       .select("id, label, created_at")
       .single();
-    if (error || !data) { console.error("createGame failed:", error?.message, error?.code, error?.details); return; }
+    if (error || !data) { console.error("createGame failed:", error?.message); return; }
     setGamesIndex((prev) => [data, ...prev]);
     setActiveId(data.id);
     setScreen("game");
@@ -53,24 +76,112 @@ export default function PlayTracker() {
     setGamesIndex((prev) => prev.filter((g) => g.id !== id));
   }
 
+  async function signOut() {
+    await supabase.auth.signOut();
+  }
+
+  if (authLoading) return <LoadingScreen />;
+  if (!user) return <AuthScreen />;
+
   if (screen === "games") {
     return <GamesList index={gamesIndex} loading={loadingIndex} onRefresh={loadIndex}
       onOpen={(id) => { setActiveId(id); setScreen("game"); }}
-      onCreate={createGame} onDelete={deleteGame} />;
+      onCreate={createGame} onDelete={deleteGame} onSignOut={signOut} />;
   }
 
   const active = gamesIndex.find((g) => g.id === activeId);
   return <Game id={activeId} label={active?.label || "Game"} onBack={() => { setScreen("games"); loadIndex(); }} />;
 }
 
+// =================== LOADING ===================
+function LoadingScreen() {
+  return (
+    <div style={{ fontFamily: FONT_BODY, background: "#0a0e14", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 26, fontWeight: 700, letterSpacing: 3, textTransform: "uppercase", color: "#f4f4f0" }}>
+        Side<span style={{ color: "#f5c518" }}>line</span>
+      </div>
+    </div>
+  );
+}
+
+// =================== AUTH ===================
+function AuthScreen() {
+  const [tab, setTab] = useState("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState(null); // { text, error }
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit() {
+    if (!email || !password) { setMessage({ text: "Email and password are required.", error: true }); return; }
+    setLoading(true); setMessage(null);
+
+    if (tab === "signin") {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) { setMessage({ text: error.message, error: true }); setLoading(false); }
+      // on success, onAuthStateChange in root fires and swaps the screen automatically
+    } else {
+      const { error } = await supabase.auth.signUp({ email, password });
+      if (error) { setMessage({ text: error.message, error: true }); setLoading(false); return; }
+      setMessage({ text: "Account created! You're being signed in…", error: false });
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Shell subtitle="Coach Login">
+      <div style={{ padding: 24, maxWidth: 420, margin: "0 auto" }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 28 }}>
+          <button onClick={() => { setTab("signin"); setMessage(null); }} style={modeBtn(tab === "signin")}>Sign In</button>
+          <button onClick={() => { setTab("signup"); setMessage(null); }} style={modeBtn(tab === "signup", true)}>Sign Up</button>
+        </div>
+
+        <Section label="Email">
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+            placeholder="coach@yourschool.com" style={inputStyle} />
+        </Section>
+
+        <Section label="Password">
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+            placeholder={tab === "signup" ? "Min. 6 characters" : "Your password"} style={inputStyle} />
+        </Section>
+
+        {message && (
+          <div style={{ borderRadius: 10, padding: "12px 14px", marginBottom: 16, fontSize: 13,
+            background: message.error ? "#1d1015" : "#0d1a12",
+            border: `1px solid ${message.error ? "#ff5252" : "#3ddc84"}`,
+            color: message.error ? "#ff8a80" : "#3ddc84" }}>
+            {message.text}
+          </div>
+        )}
+
+        <button onClick={handleSubmit} disabled={loading} style={{
+          width: "100%", padding: "18px", borderRadius: 12, border: "none",
+          background: loading ? "#1d2530" : "#f5c518", color: loading ? "#4a5568" : "#0a0e14",
+          fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: 1.5,
+          textTransform: "uppercase", cursor: loading ? "not-allowed" : "pointer",
+        }}>
+          {loading ? "Loading…" : tab === "signin" ? "Sign In" : "Create Account"}
+        </button>
+      </div>
+    </Shell>
+  );
+}
+
 // =================== GAMES LIST ===================
-function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete }) {
+function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSignOut }) {
   const [showNew, setShowNew] = useState(false);
   const [label, setLabel] = useState("");
   const [confirmDel, setConfirmDel] = useState(null);
 
   return (
-    <Shell subtitle="Game Library">
+    <Shell subtitle="Game Library" right={
+      <button onClick={onSignOut} style={{ background: "none", border: "1px solid #2a3543", borderRadius: 8, color: "#7a8699", fontSize: 12, cursor: "pointer", fontFamily: FONT_BODY, padding: "6px 10px", letterSpacing: 0.5 }}>
+        Sign Out
+      </button>
+    }>
       <div style={{ padding: 16 }}>
         <button onClick={() => setShowNew(true)} style={{
           width: "100%", padding: "16px", borderRadius: 12, border: "none", background: "#f5c518", color: "#0a0e14",
@@ -149,40 +260,29 @@ function Game({ id, label, onBack }) {
   const editing = mode === "edit";
   const ready = editing && formation && play && (yards !== "" || incomplete);
 
-  // Initial load
   const fetchGame = useCallback(async () => {
     try {
       setSyncing(true);
-      const { data } = await supabase
-        .from("games")
-        .select("plays")
-        .eq("id", id)
-        .single();
+      const { data } = await supabase.from("games").select("plays").eq("id", id).single();
       if (data) setPlays(data.plays || []);
     } catch (e) {}
-    setSyncing(false);
-    setLoaded(true);
+    setSyncing(false); setLoaded(true);
   }, [id]);
 
   useEffect(() => { fetchGame(); }, [fetchGame]);
 
-  // Realtime subscription — pushes updates from any device instantly
   useEffect(() => {
     const channel = supabase
       .channel(`game-${id}`)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "games", filter: `id=eq.${id}` },
-        (payload) => { setPlays(payload.new.plays || []); }
-      )
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "games", filter: `id=eq.${id}` },
+        (payload) => { setPlays(payload.new.plays || []); })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [id]);
 
   const persist = useCallback(async (nextPlays) => {
-    try {
-      await supabase.from("games").update({ plays: nextPlays }).eq("id", id);
-    } catch (e) { console.error(e); }
+    try { await supabase.from("games").update({ plays: nextPlays }).eq("id", id); }
+    catch (e) { console.error(e); }
   }, [id]);
 
   function toggle(list, setList, val) { setList(list.includes(val) ? list.filter((x) => x !== val) : [...list, val]); }
@@ -209,7 +309,6 @@ function Game({ id, label, onBack }) {
     };
     const next = [newPlay, ...plays];
     setPlays(next); persist(next);
-
     const gotFirst = y >= distance;
     if (gotFirst) { setDown(1); setDistance(10); }
     else if (down < 4) { setDown(down + 1); setDistance(Math.max(distance - y, 1)); }
@@ -250,11 +349,7 @@ function Game({ id, label, onBack }) {
 
   return (
     <Shell subtitle={label} onBack={onBack}
-      right={
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 11, color: syncing ? "#f5c518" : "#3ddc84" }}>{syncing ? "syncing…" : "● live"}</span>
-        </div>
-      }>
+      right={<span style={{ fontSize: 11, color: syncing ? "#f5c518" : "#3ddc84" }}>{syncing ? "syncing…" : "● live"}</span>}>
       <div style={{ display: "flex", gap: 8, padding: "12px 16px", borderBottom: "1px solid #1d2530" }}>
         <button onClick={() => setMode("view")} style={modeBtn(mode === "view")}>👁 View</button>
         <button onClick={() => setMode("edit")} style={modeBtn(mode === "edit", true)}>✎ Edit</button>
@@ -341,13 +436,11 @@ function Game({ id, label, onBack }) {
               }}>Log Play ↵</button>
             </>
           )}
-
           {!editing && (
             <div style={{ background: "#141a24", borderRadius: 10, padding: "12px 14px", marginBottom: 16, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
               View mode — watching the live game. Switch to Edit to chart plays.
             </div>
           )}
-
           {plays.length > 0 && (
             <div style={{ marginTop: editing ? 24 : 0 }}>
               <div style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 10 }}>Play Log · {plays.length}</div>
@@ -470,7 +563,6 @@ function Breakdown({ title, data, total, keyFmt = (x) => x }) {
     })}
   </div>);
 }
-
 function CarrierBreakdown({ data }) {
   const rows = Object.entries(data).sort((a, b) => b[1].yards - a[1].yards);
   if (rows.length === 0) return null;
@@ -479,10 +571,8 @@ function CarrierBreakdown({ data }) {
     <div style={{ marginBottom: 26 }}>
       <div style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 12 }}>By Ball Carrier</div>
       <div style={{ display: "flex", padding: "0 4px 8px", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", borderBottom: "1px solid #1d2530", marginBottom: 10 }}>
-        <span style={{ flex: 1 }}>Player</span>
-        <span style={{ width: 60, textAlign: "right" }}>Touches</span>
-        <span style={{ width: 70, textAlign: "right" }}>Yards</span>
-        <span style={{ width: 50, textAlign: "right" }}>Avg</span>
+        <span style={{ flex: 1 }}>Player</span><span style={{ width: 60, textAlign: "right" }}>Touches</span>
+        <span style={{ width: 70, textAlign: "right" }}>Yards</span><span style={{ width: 50, textAlign: "right" }}>Avg</span>
       </div>
       {rows.map(([k, v]) => {
         const avg = (v.yards / v.count).toFixed(1);

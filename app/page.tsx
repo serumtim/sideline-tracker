@@ -15,6 +15,14 @@ const DEFAULT_PLAYBOOK = {
   motions: ["Jet", "Orbit", "Z-Motion", "Shift", "Across", "Return"],
   runPlays: ["Buck", "Power", "Trojan", "Counter", "Jet", "Belly", "Trap", "ISO"],
   passPlays: ["Snag", "Stick", "Vert", "Flood", "Waggle", "Pig", "Smash", "Hitches"],
+  sections: {
+    personnel: true,
+    formTags: true,
+    motion: true,
+    rpo: true,
+    carrier: true,
+    tackler: true,
+  },
 };
 
 const US_STATES = [
@@ -654,6 +662,22 @@ function PlaybookEditor({ playbook, onSave, onBack }) {
     setSaving(true); await onSave(draft); setSaving(false); onBack();
   }
 
+  const sectionToggles = [
+    { key: "personnel", label: "Personnel" },
+    { key: "formTags", label: "Formation Tags" },
+    { key: "motion", label: "Shift / Motion" },
+    { key: "rpo", label: "RPO Tags" },
+    { key: "carrier", label: "Ball Carrier" },
+    { key: "tackler", label: "Tackled By" },
+  ];
+
+  function toggleSection(key) {
+    setDraft((d) => ({
+      ...d,
+      sections: { ...(d.sections ?? DEFAULT_PLAYBOOK.sections), [key]: !(d.sections ?? DEFAULT_PLAYBOOK.sections)[key] },
+    }));
+  }
+
   const categories = [
     { key: "personnel", label: "Personnel Groups" },
     { key: "formations", label: "Formations" },
@@ -671,6 +695,19 @@ function PlaybookEditor({ playbook, onSave, onBack }) {
         <div style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 20, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
           Tap × to remove an item. Type a name and press + or Enter to add one.
         </div>
+        <Section label="Visible Sections · toggle off sections your team doesn't use">
+          {sectionToggles.map(({ key, label }) => {
+            const on = (draft.sections ?? DEFAULT_PLAYBOOK.sections)[key];
+            return (
+              <div key={key} onClick={() => toggleSection(key)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 4px", borderBottom: "1px solid #1d2530", cursor: "pointer" }}>
+                <span style={{ fontFamily: FONT_BODY, fontSize: 15, color: on ? "#f4f4f0" : "#4a5568" }}>{label}</span>
+                <div style={{ width: 44, height: 24, borderRadius: 12, background: on ? "#f5c518" : "#1d2530", position: "relative", transition: "background 0.2s", border: "1px solid " + (on ? "#f5c518" : "#2a3543") }}>
+                  <div style={{ position: "absolute", top: 2, left: on ? 22 : 2, width: 18, height: 18, borderRadius: 9, background: on ? "#0a0e14" : "#4a5568", transition: "left 0.2s" }} />
+                </div>
+              </div>
+            );
+          })}
+        </Section>
         {categories.map(({ key, label }) => (
           <PlaybookCategory key={key} label={label} items={draft[key]}
             onRemove={(item) => removeItem(key, item)}
@@ -720,6 +757,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
   const { personnel: PERSONNEL, formations: FORMATIONS, formTags: FORM_TAGS,
     positions: POSITIONS, rpoTags: RPO_TAGS, runPlays: RUN_PLAYS, passPlays: PASS_PLAYS } = playbook;
   const MOTIONS = ["None", ...playbook.motions];
+  const sec = playbook.sections ?? DEFAULT_PLAYBOOK.sections;
 
   const [tab, setTab] = useState("log");
   const [mode, setMode] = useState("view");
@@ -732,6 +770,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
   const [formTags, setFormTags] = useState([]);
   const [position, setPosition] = useState("");
   const [rpoTags, setRpoTags] = useState([]);
+  const [rpoPlayer, setRpoPlayer] = useState("");
   const [motion, setMotion] = useState("None");
   const [motionPlayer, setMotionPlayer] = useState("");
   const [hash, setHash] = useState("M");
@@ -745,6 +784,12 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
   const [carrier, setCarrier] = useState("");
   const [tacklerPos, setTacklerPos] = useState("");
   const [tacklerNum, setTacklerNum] = useState("");
+  const [fumbleForcerPos, setFumbleForcerPos] = useState("");
+  const [fumbleForcerNum, setFumbleForcerNum] = useState("");
+  const [fumbleRecovery, setFumbleRecovery] = useState("");
+  const [intByPos, setIntByPos] = useState("");
+  const [intByNum, setIntByNum] = useState("");
+  const [intReturn, setIntReturn] = useState("0");
 
   const editing = mode === "edit";
   const ready = editing && formation && play && (yards !== "" || incomplete);
@@ -789,29 +834,40 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
     const y = incomplete ? 0 : (parseInt(yards, 10) || 0);
     const newPlay = {
       id: Date.now() + Math.random(), personnel: personnel || "—", formation, formTags: [...formTags], position,
-      rpoTags: [...rpoTags], motion, motionPlayer: motion !== "None" ? motionPlayer : "",
+      rpoTags: [...rpoTags], rpoPlayer: rpoTags.length > 0 ? rpoPlayer : "",
+      motion, motionPlayer: motion !== "None" ? motionPlayer : "",
       hash, down, distance, play, playType, yards: y,
-      gainType: incomplete ? "Pass" : gainType, incomplete, carrier: incomplete ? "" : carrier.trim(),
+      gainType, incomplete, carrier: incomplete ? "" : carrier.trim(),
       tacklerPos, tacklerNum: tacklerNum.trim(),
       tackler: tacklerPos || tacklerNum ? `${tacklerPos}${tacklerNum ? " #" + tacklerNum : ""}` : "—",
+      fumbleForcer: gainType === "Fumble" ? (`${fumbleForcerPos}${fumbleForcerNum ? " #" + fumbleForcerNum : ""}`).trim() || "—" : "",
+      fumbleRecovery: gainType === "Fumble" ? fumbleRecovery : "",
+      intBy: gainType === "INT" ? (`${intByPos}${intByNum ? " #" + intByNum : ""}`).trim() || "—" : "",
+      intReturn: gainType === "INT" ? (parseInt(intReturn, 10) || 0) : 0,
     };
     const next = [newPlay, ...plays];
     setPlays(next); persist(next);
-    const gotFirst = y >= distance;
-    if (gotFirst) { setDown(1); setDistance(10); }
-    else if (down < 4) { setDown(down + 1); setDistance(Math.max(distance - y, 1)); }
-    else { setDown(1); setDistance(10); }
+    if (gainType === "TD" || gainType === "INT" || gainType === "Safety") {
+      setDown(1); setDistance(10);
+    } else {
+      const gotFirst = y >= distance;
+      if (gotFirst) { setDown(1); setDistance(10); }
+      else if (down < 4) { setDown(down + 1); setDistance(Math.max(distance - y, 1)); }
+      else { setDown(1); setDistance(10); }
+    }
     setPlay(""); setPlayType(""); setYards(""); setGainType(""); setIncomplete(false);
     setCarrier(""); setTacklerPos(""); setTacklerNum(""); setMotion("None"); setMotionPlayer("");
-    setFormTags([]); setPosition(""); setRpoTags([]);
+    setFormTags([]); setPosition(""); setRpoTags([]); setRpoPlayer("");
+    setFumbleForcerPos(""); setFumbleForcerNum(""); setFumbleRecovery("");
+    setIntByPos(""); setIntByNum(""); setIntReturn("0");
   }
 
   async function deletePlay(pid) { const next = plays.filter((p) => p.id !== pid); setPlays(next); persist(next); }
 
   function exportCSV() {
-    const headers = ["#", "Personnel", "Formation", "Form Tags", "Pos", "RPO", "Motion Player", "Motion", "Hash", "Down", "Distance", "Play", "Gain Type", "Yards", "Incomplete", "Ball Carrier", "Tackled By"];
+    const headers = ["#", "Personnel", "Formation", "Form Tags", "Pos", "RPO", "RPO Player", "Motion Player", "Motion", "Hash", "Down", "Distance", "Play", "Gain Type", "Yards", "Incomplete", "Ball Carrier", "Tackled By"];
     const ordered = [...plays].reverse();
-    const rows = ordered.map((p, i) => [i + 1, p.personnel, p.formation, p.formTags.join(" "), p.position, p.rpoTags.join(" "), p.motion !== "None" ? (p.motionPlayer || "") : "", p.motion, p.hash, ordinal(p.down), p.distance, p.play, p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", p.carrier || "", p.tackler]);
+    const rows = ordered.map((p, i) => [i + 1, p.personnel, p.formation, p.formTags.join(" "), p.position, p.rpoTags.join(" "), p.rpoTags.length > 0 ? (p.rpoPlayer || "") : "", p.motion !== "None" ? (p.motionPlayer || "") : "", p.motion, p.hash, ordinal(p.down), p.distance, p.play, p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", p.carrier || "", p.tackler]);
     const esc = (v) => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     const csv = [headers, ...rows].map((r) => r.map(esc).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -855,10 +911,10 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
                   <span style={{ color: "#7a8699", fontSize: 13 }}>yds to go</span>
                 </div>
               </Section>
-              <Section label="Personnel"><Grid>{PERSONNEL.map((p) => <Chip key={p} active={personnel === p} onClick={() => setPersonnel(personnel === p ? "" : p)}>{p}</Chip>)}</Grid></Section>
+              {sec.personnel && <Section label="Personnel"><Grid>{PERSONNEL.map((p) => <Chip key={p} active={personnel === p} onClick={() => setPersonnel(personnel === p ? "" : p)}>{p}</Chip>)}</Grid></Section>}
               <Section label="Formation"><Grid>{FORMATIONS.map((f) => <Chip key={f} active={formation === f} onClick={() => setFormation(f)}>{f}</Chip>)}</Grid></Section>
-              <Section label="Formation Tags · tap multiple"><Grid>{FORM_TAGS.map((t) => <Chip key={t} active={formTags.includes(t)} onClick={() => toggle(formTags, setFormTags, t)}>{t}</Chip>)}</Grid></Section>
-              <Section label="Shift / Motion">
+              {sec.formTags && <Section label="Formation Tags · tap multiple"><Grid>{FORM_TAGS.map((t) => <Chip key={t} active={formTags.includes(t)} onClick={() => toggle(formTags, setFormTags, t)}>{t}</Chip>)}</Grid></Section>}
+              {sec.motion && <Section label="Shift / Motion">
                 <Grid>{MOTIONS.map((m) => <Chip key={m} active={motion === m} onClick={() => { setMotion(m); if (m === "None") setMotionPlayer(""); }}>{m}</Chip>)}</Grid>
                 {motion !== "None" && (
                   <div style={{ marginTop: 10 }}>
@@ -866,36 +922,78 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
                     <Grid>{POSITIONS.map((p) => <Chip key={p} active={motionPlayer === p} onClick={() => setMotionPlayer(motionPlayer === p ? "" : p)}>{p}</Chip>)}</Grid>
                   </div>
                 )}
-              </Section>
+              </Section>}
               <Section label="Run Play"><Grid>{RUN_PLAYS.map((p) => <Chip key={p} active={play === p && playType === "Run"} onClick={() => { setPlay(p); setPlayType("Run"); }}>{p}</Chip>)}</Grid></Section>
-              <Section label="Position + RPO Tags · tap multiple">
-                <Grid>{POSITIONS.map((p) => <Chip key={p} active={position === p} onClick={() => setPosition(position === p ? "" : p)}>{p}</Chip>)}</Grid>
-                <div style={{ marginTop: 10 }}><Grid>{RPO_TAGS.map((t) => <Chip key={t} active={rpoTags.includes(t)} onClick={() => toggle(rpoTags, setRpoTags, t)}>{t}</Chip>)}</Grid></div>
-              </Section>
+              <Section label="Position"><Grid>{POSITIONS.map((p) => <Chip key={p} active={position === p} onClick={() => setPosition(position === p ? "" : p)}>{p}</Chip>)}</Grid></Section>
+              {sec.rpo && <Section label="RPO Tags · tap multiple">
+                <Grid>{RPO_TAGS.map((t) => <Chip key={t} active={rpoTags.includes(t)} onClick={() => toggle(rpoTags, setRpoTags, t)}>{t}</Chip>)}</Grid>
+                {rpoTags.length > 0 && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's running the RPO?</div>
+                    <Grid>{POSITIONS.map((p) => <Chip key={p} active={rpoPlayer === p} onClick={() => setRpoPlayer(rpoPlayer === p ? "" : p)}>{p}</Chip>)}</Grid>
+                  </div>
+                )}
+              </Section>}
               <Section label="Pass Play"><Grid>{PASS_PLAYS.map((p) => <Chip key={p} active={play === p && playType === "Pass"} onClick={() => { setPlay(p); setPlayType("Pass"); }}>{p}</Chip>)}</Grid></Section>
               <Section label="Result">
-                <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                  <Chip active={gainType === "Run" && !incomplete} onClick={() => { setGainType("Run"); setIncomplete(false); }} big>Run</Chip>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <Chip active={gainType === "Run"} onClick={() => { setGainType("Run"); setIncomplete(false); }} big>Run</Chip>
                   <Chip active={gainType === "Pass" && !incomplete} onClick={() => { setGainType("Pass"); setIncomplete(false); }} big>Pass</Chip>
-                  <Chip active={incomplete} onClick={() => { const ni = !incomplete; setIncomplete(ni); if (ni) { setYards(""); setCarrier(""); } }} big>Inc</Chip>
+                  <Chip active={incomplete && gainType === "Pass"} onClick={() => { setGainType("Pass"); setIncomplete(true); setYards(""); setCarrier(""); }} big>Inc</Chip>
                 </div>
-                {!incomplete ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                  <Chip active={gainType === "TD"} onClick={() => { setGainType("TD"); setIncomplete(false); }} big>TD</Chip>
+                  <Chip active={gainType === "INT"} onClick={() => { setGainType("INT"); setIncomplete(true); setYards(""); setCarrier(""); }} big>INT</Chip>
+                  <Chip active={gainType === "Fumble"} onClick={() => { setGainType("Fumble"); setIncomplete(false); }} big>Fumble</Chip>
+                  <Chip active={gainType === "Safety"} onClick={() => { setGainType("Safety"); setIncomplete(true); setYards(""); setCarrier(""); }} big>Safety</Chip>
+                  <Chip active={gainType === "Sack"} onClick={() => { setGainType("Sack"); setIncomplete(false); }} big>Sack</Chip>
+                </div>
+                {gainType === "INT" ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INTERCEPTION — 0 yards</div>
+                  : gainType === "Safety" ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>SAFETY — 0 yards</div>
+                  : incomplete ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INCOMPLETE — 0 yards</div>
+                  : (
                   <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                     <button onClick={() => setYards(String((parseInt(yards, 10) || 0) - 1))} style={stepBtn}>–</button>
                     <input value={yards} onChange={(e) => setYards(e.target.value.replace(/[^-0-9]/g, ""))} placeholder="0" inputMode="numeric"
                       style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, width: 90, textAlign: "center", background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, color: "#f5c518", padding: "6px 0" }} />
                     <button onClick={() => setYards(String((parseInt(yards, 10) || 0) + 1))} style={stepBtn}>+</button>
-                    <span style={{ color: "#7a8699", fontSize: 13 }}>yards gained</span>
+                    <span style={{ color: "#7a8699", fontSize: 13 }}>{gainType === "Sack" ? "yards lost" : "yards gained"}</span>
                   </div>
-                ) : <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INCOMPLETE — 0 yards</div>}
+                )}
               </Section>
-              {!incomplete && (
+              {gainType === "Fumble" && (
+                <Section label="Fumble Details">
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who forced the fumble?</div>
+                  <Grid>{DEF_POS.map((pos) => <Chip key={pos} active={fumbleForcerPos === pos} onClick={() => setFumbleForcerPos(fumbleForcerPos === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
+                  <input value={fumbleForcerNum} onChange={(e) => setFumbleForcerNum(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Defender jersey #" inputMode="numeric" style={{ ...inputStyle, marginTop: 10 }} />
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginTop: 14, marginBottom: 8 }}>Recovered by</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <Chip active={fumbleRecovery === "Offense"} onClick={() => setFumbleRecovery(fumbleRecovery === "Offense" ? "" : "Offense")} big>Offense</Chip>
+                    <Chip active={fumbleRecovery === "Defense"} onClick={() => setFumbleRecovery(fumbleRecovery === "Defense" ? "" : "Defense")} big>Defense</Chip>
+                  </div>
+                </Section>
+              )}
+              {gainType === "INT" && (
+                <Section label="Interception Details">
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who made the INT?</div>
+                  <Grid>{DEF_POS.map((pos) => <Chip key={pos} active={intByPos === pos} onClick={() => setIntByPos(intByPos === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
+                  <input value={intByNum} onChange={(e) => setIntByNum(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Defender jersey #" inputMode="numeric" style={{ ...inputStyle, marginTop: 10 }} />
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginTop: 14, marginBottom: 8 }}>Return yards</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <button onClick={() => setIntReturn(String(Math.max(0, (parseInt(intReturn, 10) || 0) - 1)))} style={stepBtn}>–</button>
+                    <input value={intReturn} onChange={(e) => setIntReturn(e.target.value.replace(/[^0-9]/g, ""))} placeholder="0" inputMode="numeric" style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, width: 90, textAlign: "center", background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, color: "#f5c518", padding: "6px 0" }} />
+                    <button onClick={() => setIntReturn(String((parseInt(intReturn, 10) || 0) + 1))} style={stepBtn}>+</button>
+                    <span style={{ color: "#7a8699", fontSize: 13 }}>return yards</span>
+                  </div>
+                </Section>
+              )}
+              {sec.carrier && !incomplete && (
                 <Section label="Ball Carrier / Receiver #">
                   {usedCarriers.length > 0 && <Grid>{usedCarriers.map((n) => <Chip key={n} active={carrier === n} onClick={() => setCarrier(carrier === n ? "" : n)}>#{n}</Chip>)}</Grid>}
                   <input value={carrier} onChange={(e) => setCarrier(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: usedCarriers.length ? 10 : 0 }} />
                 </Section>
               )}
-              <Section label="Tackled By (Defender)">
+              {sec.tackler && <Section label={gainType === "Sack" ? "Sack / TFL — Defender" : "Tackled By (Defender)"}>
                 <Grid>{DEF_POS.map((pos) => <Chip key={pos} active={tacklerPos === pos} onClick={() => setTacklerPos(tacklerPos === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
                 {usedTacklers.length > 0 && <div style={{ marginTop: 10 }}><Grid>{usedTacklers.map((n) => <Chip key={n} active={tacklerNum === n} onClick={() => { const sel = tacklerNum === n; setTacklerNum(sel ? "" : n); if (!sel && defPosMap[n]) setTacklerPos(defPosMap[n]); }}>{defLabel(n)}</Chip>)}</Grid></div>}
                 <input value={tacklerNum} onChange={(e) => setTacklerNum(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Defender jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: 10 }} />
@@ -911,7 +1009,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
                     ))}
                   </div>
                 )}
-              </Section>
+              </Section>}
               <button onClick={logPlay} disabled={!ready} style={{
                 width: "100%", marginTop: 8, padding: "18px", borderRadius: 12, border: "none",
                 background: ready ? "#f5c518" : "#1d2530", color: ready ? "#0a0e14" : "#4a5568",
@@ -928,12 +1026,14 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
             <div style={{ marginTop: editing ? 24 : 0 }}>
               <div style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 10 }}>Play Log · {plays.length}</div>
               {plays.map((p) => (
-                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${p.incomplete ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518"}` }}>
+                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${p.gainType === "TD" ? "#3ddc84" : (p.incomplete || p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Sack") ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518"}` }}>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>{ordinal(p.down)} &amp; {p.distance} · {p.hash} · {p.personnel} {p.formation}{p.formTags.length ? ` ${p.formTags.join(" ")}` : ""}</div>
-                    <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{p.play}{p.position || p.rpoTags.length ? ` · ${p.position ? p.position + " " : ""}${p.rpoTags.join("/")}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.carrier ? ` · #${p.carrier}` : ""} · tkl {p.tackler}</div>
+                    <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{p.play}{p.position || p.rpoTags?.length ? ` · ${p.position ? p.position + " " : ""}${p.rpoTags?.join("/")}${p.rpoTags?.length && p.rpoPlayer ? " (" + p.rpoPlayer + ")" : ""}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{p.gainType === "Fumble" ? ` · frc ${p.fumbleForcer || "—"}${p.fumbleRecovery ? " · " + p.fumbleRecovery.toLowerCase() + " rec" : ""}` : ""}{p.gainType === "INT" ? ` · int ${p.intBy || "—"}${p.intReturn ? " · " + p.intReturn + " yd ret" : ""}` : ""}{p.gainType !== "INT" && p.gainType !== "Fumble" ? ` · tkl ${p.tackler}` : ""}</div>
                   </div>
-                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, color: p.incomplete ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518", minWidth: 44, textAlign: "right" }}>{p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}</div>
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, minWidth: 44, textAlign: "right", color: p.gainType === "TD" ? "#3ddc84" : (p.incomplete || p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Sack") ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518" }}>
+                    {p.gainType === "INT" ? "INT" : p.gainType === "Safety" ? "SAF" : p.gainType === "TD" ? "TD" : p.gainType === "Sack" ? "SCK" : p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}
+                  </div>
                   {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
                 </div>
               ))}
@@ -945,11 +1045,36 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
 
       {tab === "tendencies" && (
         <div style={{ padding: 16 }}>
-          {plays.length === 0 ? <div style={{ textAlign: "center", color: "#4a5568", padding: "60px 20px", fontSize: 15 }}>No plays logged yet.</div> : (
-            <>
-              <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
-                <Stat label="Plays" value={plays.length} /><Stat label="Total Yds" value={tendencies.totalYards} /><Stat label="Yds / Play" value={tendencies.avg} accent />
+          {plays.length === 0 ? <div style={{ textAlign: "center", color: "#4a5568", padding: "60px 20px", fontSize: 15 }}>No plays logged yet.</div> : (() => {
+            const rushPlays = plays.filter(p => p.playType === "Run" || p.gainType === "Sack");
+            const rushYards = rushPlays.reduce((s, p) => s + p.yards, 0);
+            const rushTDs = plays.filter(p => p.gainType === "TD" && p.playType === "Run").length;
+            const passPlays = plays.filter(p => p.playType === "Pass" && p.gainType !== "Sack");
+            const passComp = passPlays.filter(p => !p.incomplete && p.gainType !== "INT").length;
+            const passYards = passPlays.filter(p => !p.incomplete && p.gainType !== "INT").reduce((s, p) => s + p.yards, 0);
+            const passTDs = plays.filter(p => p.gainType === "TD" && p.playType === "Pass").length;
+            const ints = plays.filter(p => p.gainType === "INT").length;
+            const fumbles = plays.filter(p => p.gainType === "Fumble").length;
+            const sacks = plays.filter(p => p.gainType === "Sack").length;
+            const safeties = plays.filter(p => p.gainType === "Safety").length;
+            const bsRow = (label, value) => (
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #1d2530" }}>
+                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 1, textTransform: "uppercase", color: "#7a8699" }}>{label}</span>
+                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, color: "#f4f4f0" }}>{value}</span>
               </div>
+            );
+            return (
+              <>
+                <div style={{ background: "#11161f", border: "1px solid #1d2530", borderRadius: 12, padding: "14px 16px", marginBottom: 20 }}>
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#f5c518", marginBottom: 10 }}>Box Score</div>
+                  {bsRow("Total", `${plays.length} plays · ${rushYards + passYards >= 0 ? "+" : ""}${rushYards + passYards} yds`)}
+                  {bsRow("Rush", `${rushPlays.length} att · ${rushYards >= 0 ? "+" : ""}${rushYards} yds${rushTDs ? ` · ${rushTDs} TD` : ""}${sacks ? ` · ${sacks} sack${sacks > 1 ? "s" : ""}` : ""}`)}
+                  {bsRow("Pass", `${passComp}/${passPlays.length} · ${passYards >= 0 ? "+" : ""}${passYards} yds${passTDs ? ` · ${passTDs} TD` : ""}${ints ? ` · ${ints} INT` : ""}`)}
+                  {(fumbles > 0 || safeties > 0) && bsRow("Turnovers", `${fumbles ? fumbles + " fumble" + (fumbles > 1 ? "s" : "") : ""}${fumbles && safeties ? " · " : ""}${safeties ? safeties + " safety" : ""}`)}
+                </div>
+                <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+                  <Stat label="Plays" value={plays.length} /><Stat label="Total Yds" value={tendencies.totalYards} /><Stat label="Yds / Play" value={tendencies.avg} accent />
+                </div>
               <Breakdown title="Run vs Pass" data={tendencies.byGain} total={plays.length} />
               <Breakdown title="By Personnel" data={tendencies.byPersonnel} total={plays.length} />
               <Breakdown title="By Formation" data={tendencies.byFormation} total={plays.length} />
@@ -958,7 +1083,8 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
               <Breakdown title="By Down" data={tendencies.byDown} total={plays.length} keyFmt={ordinal} />
               <CarrierBreakdown data={tendencies.byCarrier} />
             </>
-          )}
+          );
+          })()}
         </div>
       )}
 

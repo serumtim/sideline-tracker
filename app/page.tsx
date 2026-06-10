@@ -4,15 +4,25 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { supabase } from "../lib/supabase";
 
 const HASHES = ["L", "M", "R"];
-const PERSONNEL = ["Tiger", "Grizzly", "Cheetah"];
-const FORMATIONS = ["Red", "Blue", "Green", "Yellow", "Brown", "Black"];
-const FORM_TAGS = ["Over", "Flop", "Strong", "Trips", "Loose", "Empty"];
-const POSITIONS = ["X", "Y", "A", "B", "F"];
-const RPO_TAGS = ["Pop", "Peak"];
-const MOTIONS = ["None", "Jet", "Orbit", "Z-Motion", "Shift", "Across", "Return"];
-const RUN_PLAYS = ["Buck", "Power", "Trojan", "Counter", "Jet", "Belly", "Trap", "ISO"];
-const PASS_PLAYS = ["Snag", "Stick", "Vert", "Flood", "Waggle", "Pig", "Smash", "Hitches"];
 const DEF_POS = ["DL", "LB", "CB", "S", "DB", "EDGE"];
+
+const DEFAULT_PLAYBOOK = {
+  personnel: ["Tiger", "Grizzly", "Cheetah"],
+  formations: ["Red", "Blue", "Green", "Yellow", "Brown", "Black"],
+  formTags: ["Over", "Flop", "Strong", "Trips", "Loose", "Empty"],
+  positions: ["X", "Y", "A", "B", "F"],
+  rpoTags: ["Pop", "Peak"],
+  motions: ["Jet", "Orbit", "Z-Motion", "Shift", "Across", "Return"],
+  runPlays: ["Buck", "Power", "Trojan", "Counter", "Jet", "Belly", "Trap", "ISO"],
+  passPlays: ["Snag", "Stick", "Vert", "Flood", "Waggle", "Pig", "Smash", "Hitches"],
+};
+
+const US_STATES = [
+  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA",
+  "KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ",
+  "NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT",
+  "VA","WA","WV","WI","WY",
+];
 
 const FONT_DISPLAY = "'Oswald', 'Arial Narrow', sans-serif";
 const FONT_BODY = "'Barlow', system-ui, sans-serif";
@@ -21,10 +31,16 @@ const FONT_BODY = "'Barlow', system-ui, sans-serif";
 export default function PlayTracker() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  // undefined = still loading profile, null = loaded but no profile, object = loaded profile
+  const [profile, setProfile] = useState(undefined);
   const [screen, setScreen] = useState("games");
   const [gamesIndex, setGamesIndex] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [loadingIndex, setLoadingIndex] = useState(true);
+  const [playbook, setPlaybook] = useState(DEFAULT_PLAYBOOK);
+
+  const isHeadCoach = profile?.role !== "assistant";
+  const canEditPlaybook = isHeadCoach || profile?.can_edit_playbook === true;
 
   const loadIndex = useCallback(async () => {
     try {
@@ -37,29 +53,52 @@ export default function PlayTracker() {
     setLoadingIndex(false);
   }, []);
 
+  async function fetchPlaybook(prof, uid) {
+    const targetId = prof?.role === "assistant" && prof?.team_id ? prof.team_id : uid;
+    if (!targetId) return;
+    const { data } = await supabase.from("playbooks").select("data").eq("user_id", targetId).maybeSingle();
+    if (data?.data) setPlaybook({ ...DEFAULT_PLAYBOOK, ...data.data });
+  }
+
+  async function initUser(u) {
+    setUser(u);
+    setProfile(undefined);
+    const { data: prof } = await supabase.from("profiles").select("*").eq("user_id", u.id).maybeSingle();
+    setProfile(prof);
+    loadIndex();
+    fetchPlaybook(prof, u.id);
+  }
+
+  // Called by AuthScreen after a successful sign-up (profile already created)
+  function handleSignedUp(u, prof) {
+    setUser(u);
+    setProfile(prof);
+    setAuthLoading(false);
+    loadIndex();
+    fetchPlaybook(prof, u.id);
+  }
+
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      setUser(user);
-      if (user) loadIndex();
+    supabase.auth.getUser().then(async ({ data: { user: u } }) => {
+      if (u) await initUser(u);
+      else setProfile(null);
       setAuthLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        loadIndex();
-      } else {
-        setGamesIndex([]);
-        setScreen("games");
-        setActiveId(null);
-        setLoadingIndex(true);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === "SIGNED_IN" && session?.user) {
+        await initUser(session.user);
+      } else if (event === "SIGNED_OUT") {
+        setUser(null); setProfile(null); setPlaybook(DEFAULT_PLAYBOOK);
+        setGamesIndex([]); setScreen("games"); setActiveId(null); setLoadingIndex(true);
       }
     });
 
     return () => subscription.unsubscribe();
-  }, [loadIndex]);
+  }, []);
 
   async function createGame(label) {
+    if (!isHeadCoach) return;
     const { data, error } = await supabase
       .from("games")
       .insert({ label: label.trim() || "Untitled Game", plays: [], user_id: user.id })
@@ -67,30 +106,60 @@ export default function PlayTracker() {
       .single();
     if (error || !data) { console.error("createGame failed:", error?.message); return; }
     setGamesIndex((prev) => [data, ...prev]);
-    setActiveId(data.id);
-    setScreen("game");
+    setActiveId(data.id); setScreen("game");
   }
 
   async function deleteGame(id) {
+    if (!isHeadCoach) return;
     await supabase.from("games").delete().eq("id", id);
     setGamesIndex((prev) => prev.filter((g) => g.id !== id));
   }
 
-  async function signOut() {
-    await supabase.auth.signOut();
+  async function savePlaybook(data) {
+    if (!canEditPlaybook) return;
+    const targetId = profile.role === "assistant" ? profile.team_id : user.id;
+    const { error } = await supabase.from("playbooks").upsert({
+      user_id: targetId, data, updated_at: new Date().toISOString(),
+    });
+    if (!error) setPlaybook(data);
   }
 
-  if (authLoading) return <LoadingScreen />;
-  if (!user) return <AuthScreen />;
+  async function signOut() { await supabase.auth.signOut(); }
 
-  if (screen === "games") {
-    return <GamesList index={gamesIndex} loading={loadingIndex} onRefresh={loadIndex}
+  if (authLoading || profile === undefined) return <LoadingScreen />;
+  if (!user) return <AuthScreen onSignedUp={handleSignedUp} />;
+  if (!profile) return (
+    <SetupScreen userId={user.id} userEmail={user.email || ""} onDone={(prof) => {
+      setProfile(prof); fetchPlaybook(prof, user.id);
+    }} />
+  );
+
+  if (screen === "staff" && isHeadCoach) return (
+    <StaffScreen profile={profile} onBack={() => setScreen("games")} />
+  );
+  if (screen === "playbook" && canEditPlaybook) return (
+    <PlaybookEditor playbook={playbook} onSave={savePlaybook} onBack={() => setScreen("games")} />
+  );
+  if (screen === "games") return (
+    <GamesList
+      index={gamesIndex} loading={loadingIndex} onRefresh={loadIndex}
       onOpen={(id) => { setActiveId(id); setScreen("game"); }}
-      onCreate={createGame} onDelete={deleteGame} onSignOut={signOut} />;
-  }
+      onCreate={createGame} onDelete={deleteGame}
+      onSignOut={signOut}
+      isHeadCoach={isHeadCoach}
+      canEditPlaybook={canEditPlaybook}
+      profile={profile}
+      onEditPlaybook={() => setScreen("playbook")}
+      onViewStaff={() => setScreen("staff")}
+    />
+  );
 
   const active = gamesIndex.find((g) => g.id === activeId);
-  return <Game id={activeId} label={active?.label || "Game"} onBack={() => { setScreen("games"); loadIndex(); }} />;
+  return (
+    <Game id={activeId} label={active?.label || "Game"} playbook={playbook}
+      isHeadCoach={isHeadCoach}
+      onBack={() => { setScreen("games"); loadIndex(); }} />
+  );
 }
 
 // =================== LOADING ===================
@@ -105,26 +174,34 @@ function LoadingScreen() {
 }
 
 // =================== AUTH ===================
-function AuthScreen() {
+function AuthScreen({ onSignedUp }) {
   const [tab, setTab] = useState("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [message, setMessage] = useState(null); // { text, error }
+  const [school, setSchool] = useState("");
+  const [state, setState] = useState("");
+  const [message, setMessage] = useState(null);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit() {
     if (!email || !password) { setMessage({ text: "Email and password are required.", error: true }); return; }
+    if (tab === "signup" && !school.trim()) { setMessage({ text: "School name is required.", error: true }); return; }
     setLoading(true); setMessage(null);
 
     if (tab === "signin") {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) { setMessage({ text: error.message, error: true }); setLoading(false); }
-      // on success, onAuthStateChange in root fires and swaps the screen automatically
+      // success: onAuthStateChange in PlayTracker handles the rest
     } else {
-      const { error } = await supabase.auth.signUp({ email, password });
+      const { data, error } = await supabase.auth.signUp({ email, password });
       if (error) { setMessage({ text: error.message, error: true }); setLoading(false); return; }
-      setMessage({ text: "Account created! You're being signed in…", error: false });
-      setLoading(false);
+      const uid = data.user?.id;
+      if (!uid) { setMessage({ text: "Signup succeeded but no user ID — try signing in.", error: true }); setLoading(false); return; }
+      const token = crypto.randomUUID();
+      await supabase.from("profiles").upsert({
+        user_id: uid, email: email.trim(), school: school.trim(), state, role: "head_coach", invite_token: token,
+      });
+      onSignedUp(data.user, { user_id: uid, email: email.trim(), school: school.trim(), state, role: "head_coach", invite_token: token });
     }
   }
 
@@ -135,63 +212,236 @@ function AuthScreen() {
           <button onClick={() => { setTab("signin"); setMessage(null); }} style={modeBtn(tab === "signin")}>Sign In</button>
           <button onClick={() => { setTab("signup"); setMessage(null); }} style={modeBtn(tab === "signup", true)}>Sign Up</button>
         </div>
-
         <Section label="Email">
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
             placeholder="coach@yourschool.com" style={inputStyle} />
         </Section>
-
         <Section label="Password">
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
             placeholder={tab === "signup" ? "Min. 6 characters" : "Your password"} style={inputStyle} />
         </Section>
-
+        {tab === "signup" && (
+          <>
+            <Section label="School Name">
+              <input value={school} onChange={(e) => setSchool(e.target.value)}
+                placeholder="e.g. Central High School" style={inputStyle} />
+            </Section>
+            <Section label="State">
+              <select value={state} onChange={(e) => setState(e.target.value)} style={{ ...inputStyle, appearance: "none" }}>
+                <option value="">Select state…</option>
+                {US_STATES.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </Section>
+          </>
+        )}
         {message && (
           <div style={{ borderRadius: 10, padding: "12px 14px", marginBottom: 16, fontSize: 13,
             background: message.error ? "#1d1015" : "#0d1a12",
             border: `1px solid ${message.error ? "#ff5252" : "#3ddc84"}`,
-            color: message.error ? "#ff8a80" : "#3ddc84" }}>
-            {message.text}
-          </div>
+            color: message.error ? "#ff8a80" : "#3ddc84" }}>{message.text}</div>
         )}
-
         <button onClick={handleSubmit} disabled={loading} style={{
           width: "100%", padding: "18px", borderRadius: 12, border: "none",
           background: loading ? "#1d2530" : "#f5c518", color: loading ? "#4a5568" : "#0a0e14",
           fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: 1.5,
           textTransform: "uppercase", cursor: loading ? "not-allowed" : "pointer",
-        }}>
-          {loading ? "Loading…" : tab === "signin" ? "Sign In" : "Create Account"}
-        </button>
+        }}>{loading ? "Loading…" : tab === "signin" ? "Sign In" : "Create Account"}</button>
+      </div>
+    </Shell>
+  );
+}
+
+// =================== SETUP (existing accounts without a profile) ===================
+function SetupScreen({ userId, userEmail, onDone }) {
+  const [school, setSchool] = useState("");
+  const [state, setState] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSave() {
+    if (!school.trim()) { setError("School name is required."); return; }
+    setSaving(true);
+    const token = crypto.randomUUID();
+    const { data, error: upsertError } = await supabase.from("profiles").upsert({
+      user_id: userId, email: userEmail, school: school.trim(), state, role: "head_coach", invite_token: token,
+    }, { onConflict: "user_id" }).select().single();
+    if (upsertError) {
+      console.error("Profile save failed:", upsertError.message, upsertError.code, upsertError.details);
+      setError(`Error: ${upsertError.message}`);
+      setSaving(false);
+      return;
+    }
+    if (data) onDone(data);
+    else { setError("Something went wrong. Try again."); setSaving(false); }
+  }
+
+  return (
+    <Shell subtitle="Set Up Your Profile">
+      <div style={{ padding: 24, maxWidth: 420, margin: "0 auto" }}>
+        <div style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 24, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
+          One quick step — tell us about your program so your staff can find you.
+        </div>
+        <Section label="School Name">
+          <input value={school} onChange={(e) => setSchool(e.target.value)}
+            placeholder="e.g. Central High School" style={inputStyle} />
+        </Section>
+        <Section label="State">
+          <select value={state} onChange={(e) => setState(e.target.value)} style={{ ...inputStyle, appearance: "none" }}>
+            <option value="">Select state…</option>
+            {US_STATES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </Section>
+        {error && <div style={{ color: "#ff8a80", fontSize: 13, marginBottom: 16 }}>{error}</div>}
+        <button onClick={handleSave} disabled={saving} style={{
+          width: "100%", padding: "18px", borderRadius: 12, border: "none",
+          background: saving ? "#1d2530" : "#f5c518", color: saving ? "#4a5568" : "#0a0e14",
+          fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: 1.5,
+          textTransform: "uppercase", cursor: saving ? "not-allowed" : "pointer",
+        }}>{saving ? "Saving…" : "Save & Continue"}</button>
+      </div>
+    </Shell>
+  );
+}
+
+// =================== STAFF SCREEN ===================
+function StaffScreen({ profile, onBack }) {
+  const [copied, setCopied] = useState(false);
+  const [staff, setStaff] = useState([]);
+  const [loadingStaff, setLoadingStaff] = useState(true);
+  const [toggling, setToggling] = useState(null);
+
+  const inviteUrl = typeof window !== "undefined"
+    ? `${window.location.origin}/join?token=${profile.invite_token}`
+    : "";
+
+  useEffect(() => {
+    supabase.from("profiles")
+      .select("user_id, email, can_edit_playbook")
+      .eq("team_id", profile.user_id)
+      .then(({ data }) => { setStaff(data || []); setLoadingStaff(false); });
+  }, [profile.user_id]);
+
+  function copyLink() {
+    navigator.clipboard.writeText(inviteUrl).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  }
+
+  async function togglePlaybook(assistantId, current) {
+    setToggling(assistantId);
+    const { error } = await supabase.from("profiles")
+      .update({ can_edit_playbook: !current })
+      .eq("user_id", assistantId);
+    if (!error) {
+      setStaff((prev) => prev.map((s) =>
+        s.user_id === assistantId ? { ...s, can_edit_playbook: !current } : s
+      ));
+    }
+    setToggling(null);
+  }
+
+  return (
+    <Shell subtitle="Staff Access" onBack={onBack}>
+      <div style={{ padding: 16 }}>
+        <div style={{ background: "#11161f", borderRadius: 12, padding: 16, marginBottom: 20, border: "1px solid #1d2530" }}>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 6 }}>Your Program</div>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 20, fontWeight: 700 }}>{profile.school || "—"}</div>
+          {profile.state && <div style={{ fontSize: 13, color: "#7a8699", marginTop: 2 }}>{profile.state}</div>}
+        </div>
+
+        <Section label="Invite Link — text or email this to your staff">
+          <div style={{ background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, padding: "12px 14px", fontSize: 12, color: "#a8b3c4", wordBreak: "break-all", marginBottom: 10, fontFamily: FONT_BODY }}>
+            {inviteUrl}
+          </div>
+          <button onClick={copyLink} style={{ ...solidBtn, width: "100%", padding: "16px" }}>
+            {copied ? "✓ Copied to clipboard!" : "Copy Invite Link"}
+          </button>
+        </Section>
+
+        <Section label={`Staff · ${loadingStaff ? "…" : staff.length} connected`}>
+          {loadingStaff ? (
+            <div style={{ color: "#4a5568", fontSize: 14 }}>Loading…</div>
+          ) : staff.length === 0 ? (
+            <div style={{ color: "#4a5568", fontSize: 14, padding: "8px 0" }}>No staff connected yet. Share the invite link above.</div>
+          ) : staff.map((s) => (
+            <div key={s.user_id} style={{ background: "#141a24", border: "1px solid #2a3543", borderRadius: 12, padding: "14px 16px", marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <div>
+                  <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 16 }}>
+                    {s.email || "Assistant Coach"}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#7a8699", marginTop: 2 }}>Assistant · {profile.school}</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "#11161f", borderRadius: 10, padding: "12px 14px" }}>
+                <div>
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, letterSpacing: 0.5 }}>Can Edit Playbook</div>
+                  <div style={{ fontSize: 12, color: "#7a8699", marginTop: 2 }}>
+                    {s.can_edit_playbook ? "Enabled — this coach can add and remove plays" : "Disabled — view only"}
+                  </div>
+                </div>
+                <button
+                  onClick={() => togglePlaybook(s.user_id, s.can_edit_playbook)}
+                  disabled={toggling === s.user_id}
+                  style={{
+                    width: 52, height: 30, borderRadius: 15, border: "none", cursor: "pointer",
+                    background: s.can_edit_playbook ? "#f5c518" : "#2a3543",
+                    position: "relative", transition: "background 0.2s", flexShrink: 0, marginLeft: 16,
+                    opacity: toggling === s.user_id ? 0.6 : 1,
+                  }}
+                >
+                  <div style={{
+                    width: 22, height: 22, borderRadius: "50%", background: "#fff",
+                    position: "absolute", top: 4,
+                    left: s.can_edit_playbook ? 26 : 4,
+                    transition: "left 0.2s",
+                  }} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </Section>
       </div>
     </Shell>
   );
 }
 
 // =================== GAMES LIST ===================
-function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSignOut }) {
+function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSignOut, onEditPlaybook, onViewStaff, isHeadCoach, canEditPlaybook, profile }) {
   const [showNew, setShowNew] = useState(false);
   const [label, setLabel] = useState("");
   const [confirmDel, setConfirmDel] = useState(null);
 
   return (
-    <Shell subtitle="Game Library" right={
-      <button onClick={onSignOut} style={{ background: "none", border: "1px solid #2a3543", borderRadius: 8, color: "#7a8699", fontSize: 12, cursor: "pointer", fontFamily: FONT_BODY, padding: "6px 10px", letterSpacing: 0.5 }}>
-        Sign Out
-      </button>
-    }>
+    <Shell
+      subtitle={isHeadCoach ? (profile?.school || "Game Library") : `${profile?.school || "Team"} · Staff`}
+      right={
+        <div style={{ display: "flex", gap: 8 }}>
+          {isHeadCoach && <button onClick={onViewStaff} style={headerBtn}>Staff</button>}
+          {canEditPlaybook && <button onClick={onEditPlaybook} style={headerBtn}>Playbook</button>}
+          <button onClick={onSignOut} style={headerBtn}>Sign Out</button>
+        </div>
+      }
+    >
       <div style={{ padding: 16 }}>
-        <button onClick={() => setShowNew(true)} style={{
-          width: "100%", padding: "16px", borderRadius: 12, border: "none", background: "#f5c518", color: "#0a0e14",
-          fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", cursor: "pointer", marginBottom: 16,
-        }}>+ New Game</button>
+        {isHeadCoach ? (
+          <button onClick={() => setShowNew(true)} style={{
+            width: "100%", padding: "16px", borderRadius: 12, border: "none", background: "#f5c518", color: "#0a0e14",
+            fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", cursor: "pointer", marginBottom: 16,
+          }}>+ New Game</button>
+        ) : (
+          <div style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 16, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
+            Staff view — open a game to chart plays in real time.
+          </div>
+        )}
 
         {showNew && (
           <div style={{ background: "#11161f", borderRadius: 12, padding: 16, marginBottom: 16, border: "1px solid #2a3543" }}>
             <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 10 }}>Who are we playing?</div>
-            <input autoFocus value={label} onChange={(e) => setLabel(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { onCreate(label); setLabel(""); setShowNew(false); } }}
+            <input autoFocus value={label} onChange={(e) => setLabel(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { onCreate(label); setLabel(""); setShowNew(false); } }}
               placeholder="e.g. vs Central — Week 4" style={inputStyle} />
             <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
               <button onClick={() => { onCreate(label); setLabel(""); setShowNew(false); }} style={{ flex: 1, ...solidBtn }}>Start</button>
@@ -201,38 +451,112 @@ function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSi
         )}
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699" }}>Saved Games · {index.length}</span>
+          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699" }}>Games · {index.length}</span>
           <button onClick={onRefresh} style={{ background: "none", border: "none", color: "#7a8699", fontSize: 13, cursor: "pointer", fontFamily: FONT_BODY }}>↻ Refresh</button>
         </div>
 
         {loading ? <div style={{ color: "#4a5568", textAlign: "center", padding: 40 }}>Loading…</div> :
-          index.length === 0 ? <div style={{ color: "#4a5568", textAlign: "center", padding: 40, fontSize: 15 }}>No games yet.<br />Tap New Game to start.</div> :
+          index.length === 0 ? <div style={{ color: "#4a5568", textAlign: "center", padding: 40, fontSize: 15 }}>No games yet.</div> :
           index.map((g) => (
             <div key={g.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 12, padding: "14px 16px", marginBottom: 8, border: "1px solid #1d2530" }}>
               <button onClick={() => onOpen(g.id)} style={{ flex: 1, textAlign: "left", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
                 <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17, color: "#f4f4f0" }}>{g.label}</div>
                 <div style={{ fontSize: 12, color: "#7a8699", marginTop: 2 }}>{new Date(g.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</div>
               </button>
-              {confirmDel === g.id ? (
+              {isHeadCoach && (confirmDel === g.id ? (
                 <div style={{ display: "flex", gap: 6 }}>
                   <button onClick={() => { onDelete(g.id); setConfirmDel(null); }} style={{ ...tinyBtn, background: "#ff5252", color: "#fff" }}>Delete</button>
                   <button onClick={() => setConfirmDel(null)} style={{ ...tinyBtn, background: "#2a3543", color: "#c4cdda" }}>No</button>
                 </div>
               ) : (
                 <button onClick={() => setConfirmDel(g.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer" }}>×</button>
-              )}
+              ))}
             </div>
           ))}
-        <div style={{ fontSize: 12, color: "#4a5568", textAlign: "center", marginTop: 20, lineHeight: 1.5 }}>
-          Games sync across all devices in real time. Anyone in Edit mode can chart the live game together.
-        </div>
       </div>
     </Shell>
   );
 }
 
+// =================== PLAYBOOK EDITOR ===================
+function PlaybookEditor({ playbook, onSave, onBack }) {
+  const [draft, setDraft] = useState({ ...playbook });
+  const [saving, setSaving] = useState(false);
+
+  function removeItem(key, item) { setDraft((d) => ({ ...d, [key]: d[key].filter((x) => x !== item) })); }
+  function addItem(key, value) { setDraft((d) => ({ ...d, [key]: [...d[key], value] })); }
+
+  async function handleSave() {
+    setSaving(true); await onSave(draft); setSaving(false); onBack();
+  }
+
+  const categories = [
+    { key: "personnel", label: "Personnel Groups" },
+    { key: "formations", label: "Formations" },
+    { key: "formTags", label: "Formation Tags" },
+    { key: "runPlays", label: "Run Plays" },
+    { key: "passPlays", label: "Pass Plays" },
+    { key: "motions", label: "Motions (None is always available)" },
+    { key: "positions", label: "Positions" },
+    { key: "rpoTags", label: "RPO Tags" },
+  ];
+
+  return (
+    <Shell subtitle="Edit Playbook" onBack={onBack}>
+      <div style={{ padding: 16 }}>
+        <div style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 20, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
+          Tap × to remove an item. Type a name and press + or Enter to add one.
+        </div>
+        {categories.map(({ key, label }) => (
+          <PlaybookCategory key={key} label={label} items={draft[key]}
+            onRemove={(item) => removeItem(key, item)}
+            onAdd={(val) => addItem(key, val)} />
+        ))}
+        <button onClick={handleSave} disabled={saving} style={{
+          width: "100%", marginTop: 8, padding: "18px", borderRadius: 12, border: "none",
+          background: saving ? "#1d2530" : "#f5c518", color: saving ? "#4a5568" : "#0a0e14",
+          fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: 1.5,
+          textTransform: "uppercase", cursor: saving ? "not-allowed" : "pointer",
+        }}>{saving ? "Saving…" : "Save Playbook"}</button>
+      </div>
+    </Shell>
+  );
+}
+
+function PlaybookCategory({ label, items, onRemove, onAdd }) {
+  const [input, setInput] = useState("");
+  function submit() {
+    const t = input.trim();
+    if (t && !items.includes(t)) onAdd(t);
+    setInput("");
+  }
+  return (
+    <Section label={label}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+        {items.length === 0 && <div style={{ color: "#4a5568", fontSize: 13, padding: "6px 0" }}>None added yet</div>}
+        {items.map((item) => (
+          <div key={item} style={{ display: "flex", alignItems: "center", gap: 4, background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, padding: "9px 12px", fontFamily: FONT_DISPLAY, fontSize: 14, color: "#c4cdda" }}>
+            {item}
+            <button onClick={() => onRemove(item)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 18, cursor: "pointer", padding: "0 0 0 6px", lineHeight: 1 }}>×</button>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={input} onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          placeholder="Type and press +" style={{ ...inputStyle, flex: 1 }} />
+        <button onClick={submit} style={{ ...solidBtn, padding: "14px 20px", fontSize: 20, lineHeight: 1 }}>+</button>
+      </div>
+    </Section>
+  );
+}
+
 // =================== SINGLE GAME ===================
-function Game({ id, label, onBack }) {
+function Game({ id, label, playbook, isHeadCoach, onBack }) {
+  const { personnel: PERSONNEL, formations: FORMATIONS, formTags: FORM_TAGS,
+    positions: POSITIONS, rpoTags: RPO_TAGS, runPlays: RUN_PLAYS, passPlays: PASS_PLAYS } = playbook;
+  const MOTIONS = ["None", ...playbook.motions];
+
   const [tab, setTab] = useState("log");
   const [mode, setMode] = useState("view");
   const [plays, setPlays] = useState([]);
@@ -245,6 +569,7 @@ function Game({ id, label, onBack }) {
   const [position, setPosition] = useState("");
   const [rpoTags, setRpoTags] = useState([]);
   const [motion, setMotion] = useState("None");
+  const [motionPlayer, setMotionPlayer] = useState("");
   const [hash, setHash] = useState("M");
   const [down, setDown] = useState(1);
   const [distance, setDistance] = useState(10);
@@ -291,9 +616,7 @@ function Game({ id, label, onBack }) {
   const usedTacklers = useMemo(() => { const s = new Set(); plays.forEach((p) => p.tacklerNum && s.add(p.tacklerNum)); return [...s].sort((a, b) => a - b); }, [plays]);
   const topTacklers = useMemo(() => { const c = {}; plays.forEach((p) => { if (p.tacklerNum) c[p.tacklerNum] = (c[p.tacklerNum] || 0) + 1; }); return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, 3); }, [plays]);
   const defPosMap = useMemo(() => {
-    const m = {};
-    [...plays].reverse().forEach((p) => { if (p.tacklerNum && p.tacklerPos) m[p.tacklerNum] = p.tacklerPos; });
-    return m;
+    const m = {}; [...plays].reverse().forEach((p) => { if (p.tacklerNum && p.tacklerPos) m[p.tacklerNum] = p.tacklerPos; }); return m;
   }, [plays]);
   const defLabel = (num) => (defPosMap[num] ? `${defPosMap[num]} #${num}` : `#${num}`);
 
@@ -302,7 +625,8 @@ function Game({ id, label, onBack }) {
     const y = incomplete ? 0 : (parseInt(yards, 10) || 0);
     const newPlay = {
       id: Date.now() + Math.random(), personnel: personnel || "—", formation, formTags: [...formTags], position,
-      rpoTags: [...rpoTags], motion, hash, down, distance, play, playType, yards: y,
+      rpoTags: [...rpoTags], motion, motionPlayer: motion !== "None" ? motionPlayer : "",
+      hash, down, distance, play, playType, yards: y,
       gainType: incomplete ? "Pass" : gainType, incomplete, carrier: incomplete ? "" : carrier.trim(),
       tacklerPos, tacklerNum: tacklerNum.trim(),
       tackler: tacklerPos || tacklerNum ? `${tacklerPos}${tacklerNum ? " #" + tacklerNum : ""}` : "—",
@@ -314,15 +638,16 @@ function Game({ id, label, onBack }) {
     else if (down < 4) { setDown(down + 1); setDistance(Math.max(distance - y, 1)); }
     else { setDown(1); setDistance(10); }
     setPlay(""); setPlayType(""); setYards(""); setGainType(""); setIncomplete(false);
-    setCarrier(""); setTacklerPos(""); setTacklerNum(""); setMotion("None"); setFormTags([]); setPosition(""); setRpoTags([]);
+    setCarrier(""); setTacklerPos(""); setTacklerNum(""); setMotion("None"); setMotionPlayer("");
+    setFormTags([]); setPosition(""); setRpoTags([]);
   }
 
   async function deletePlay(pid) { const next = plays.filter((p) => p.id !== pid); setPlays(next); persist(next); }
 
   function exportCSV() {
-    const headers = ["#", "Personnel", "Formation", "Form Tags", "Pos", "RPO", "Motion", "Hash", "Down", "Distance", "Play", "Gain Type", "Yards", "Incomplete", "Ball Carrier", "Tackled By"];
+    const headers = ["#", "Personnel", "Formation", "Form Tags", "Pos", "RPO", "Motion Player", "Motion", "Hash", "Down", "Distance", "Play", "Gain Type", "Yards", "Incomplete", "Ball Carrier", "Tackled By"];
     const ordered = [...plays].reverse();
-    const rows = ordered.map((p, i) => [i + 1, p.personnel, p.formation, p.formTags.join(" "), p.position, p.rpoTags.join(" "), p.motion, p.hash, ordinal(p.down), p.distance, p.play, p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", p.carrier || "", p.tackler]);
+    const rows = ordered.map((p, i) => [i + 1, p.personnel, p.formation, p.formTags.join(" "), p.position, p.rpoTags.join(" "), p.motion !== "None" ? (p.motionPlayer || "") : "", p.motion, p.hash, ordinal(p.down), p.distance, p.play, p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", p.carrier || "", p.tackler]);
     const esc = (v) => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     const csv = [headers, ...rows].map((r) => r.map(esc).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -383,7 +708,15 @@ function Game({ id, label, onBack }) {
               <Section label="Personnel"><Grid>{PERSONNEL.map((p) => <Chip key={p} active={personnel === p} onClick={() => setPersonnel(personnel === p ? "" : p)}>{p}</Chip>)}</Grid></Section>
               <Section label="Formation"><Grid>{FORMATIONS.map((f) => <Chip key={f} active={formation === f} onClick={() => setFormation(f)}>{f}</Chip>)}</Grid></Section>
               <Section label="Formation Tags · tap multiple"><Grid>{FORM_TAGS.map((t) => <Chip key={t} active={formTags.includes(t)} onClick={() => toggle(formTags, setFormTags, t)}>{t}</Chip>)}</Grid></Section>
-              <Section label="Shift / Motion"><Grid>{MOTIONS.map((m) => <Chip key={m} active={motion === m} onClick={() => setMotion(m)}>{m}</Chip>)}</Grid></Section>
+              <Section label="Shift / Motion">
+                <Grid>{MOTIONS.map((m) => <Chip key={m} active={motion === m} onClick={() => { setMotion(m); if (m === "None") setMotionPlayer(""); }}>{m}</Chip>)}</Grid>
+                {motion !== "None" && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's in motion?</div>
+                    <Grid>{POSITIONS.map((p) => <Chip key={p} active={motionPlayer === p} onClick={() => setMotionPlayer(motionPlayer === p ? "" : p)}>{p}</Chip>)}</Grid>
+                  </div>
+                )}
+              </Section>
               <Section label="Run Play"><Grid>{RUN_PLAYS.map((p) => <Chip key={p} active={play === p && playType === "Run"} onClick={() => { setPlay(p); setPlayType("Run"); }}>{p}</Chip>)}</Grid></Section>
               <Section label="Position + RPO Tags · tap multiple">
                 <Grid>{POSITIONS.map((p) => <Chip key={p} active={position === p} onClick={() => setPosition(position === p ? "" : p)}>{p}</Chip>)}</Grid>
@@ -448,7 +781,7 @@ function Game({ id, label, onBack }) {
                 <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${p.incomplete ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518"}` }}>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>{ordinal(p.down)} &amp; {p.distance} · {p.hash} · {p.personnel} {p.formation}{p.formTags.length ? ` ${p.formTags.join(" ")}` : ""}</div>
-                    <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{p.play}{p.position || p.rpoTags.length ? ` · ${p.position ? p.position + " " : ""}${p.rpoTags.join("/")}` : ""}{p.motion !== "None" ? ` · ${p.motion}` : ""}{p.carrier ? ` · #${p.carrier}` : ""} · tkl {p.tackler}</div>
+                    <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{p.play}{p.position || p.rpoTags.length ? ` · ${p.position ? p.position + " " : ""}${p.rpoTags.join("/")}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.carrier ? ` · #${p.carrier}` : ""} · tkl {p.tackler}</div>
                   </div>
                   <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, color: p.incomplete ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518", minWidth: 44, textAlign: "right" }}>{p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}</div>
                   {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
@@ -482,7 +815,7 @@ function Game({ id, label, onBack }) {
       {tab === "export" && (
         <div style={{ padding: 16 }}>
           <div style={{ background: "#11161f", borderRadius: 12, padding: 16, marginBottom: 16, border: "1px solid #1d2530" }}>
-            <div style={{ fontSize: 14, color: "#a8b3c4", lineHeight: 1.5 }}>{plays.length} plays in <b style={{ color: "#f4f4f0" }}>{label}</b>. Downloads as a CSV you can open in Excel or Sheets and send to your staff.</div>
+            <div style={{ fontSize: 14, color: "#a8b3c4", lineHeight: 1.5 }}>{plays.length} plays in <b style={{ color: "#f4f4f0" }}>{label}</b>. Downloads as a CSV you can open in Excel or Sheets.</div>
           </div>
           <button onClick={exportCSV} disabled={plays.length === 0} style={{
             width: "100%", padding: "18px", borderRadius: 12, border: "none", background: plays.length ? "#3ddc84" : "#1d2530", color: plays.length ? "#0a0e14" : "#4a5568",
@@ -519,6 +852,7 @@ const inputStyle = { width: "100%", boxSizing: "border-box", background: "#141a2
 const solidBtn = { padding: "12px", borderRadius: 10, border: "none", background: "#f5c518", color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 15, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" };
 const ghostBtn = { padding: "12px", borderRadius: 10, border: "1px solid #2a3543", background: "transparent", color: "#c4cdda", fontFamily: FONT_DISPLAY, fontSize: 15, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" };
 const tinyBtn = { padding: "8px 12px", borderRadius: 8, border: "none", fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 600, cursor: "pointer" };
+const headerBtn = { background: "none", border: "1px solid #2a3543", borderRadius: 8, color: "#7a8699", fontSize: 12, cursor: "pointer", fontFamily: FONT_BODY, padding: "6px 10px" };
 function modeBtn(active, edit?) {
   return { flex: 1, padding: "12px", borderRadius: 10, border: active ? `1px solid ${edit ? "#f5c518" : "#3ddc84"}` : "1px solid #2a3543",
     background: active ? (edit ? "#f5c518" : "#3ddc84") : "#141a24", color: active ? "#0a0e14" : "#7a8699",

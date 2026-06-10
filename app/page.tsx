@@ -27,6 +27,22 @@ const US_STATES = [
 const FONT_DISPLAY = "'Oswald', 'Arial Narrow', sans-serif";
 const FONT_BODY = "'Barlow', system-ui, sans-serif";
 
+function calcTendencies(plays) {
+  const byPersonnel = {}, byFormation = {}, byPlay = {}, byGain = {}, byDown = {}, byHash = {}, byCarrier = {};
+  let totalYards = 0;
+  plays.forEach((p) => {
+    totalYards += p.yards;
+    for (const [obj, k] of [[byPersonnel, p.personnel], [byFormation, p.formation], [byPlay, p.play], [byGain, p.gainType || "—"], [byDown, p.down], [byHash, p.hash]]) {
+      (obj[k] ??= { count: 0, yards: 0 }); obj[k].count++; obj[k].yards += p.yards;
+    }
+    if (p.carrier) {
+      const k = `#${p.carrier}`;
+      (byCarrier[k] ??= { count: 0, yards: 0 }); byCarrier[k].count++; byCarrier[k].yards += p.yards;
+    }
+  });
+  return { byPersonnel, byFormation, byPlay, byGain, byDown, byHash, byCarrier, totalYards, avg: plays.length ? (totalYards / plays.length).toFixed(1) : "0.0" };
+}
+
 // =================== ROOT ===================
 export default function PlayTracker() {
   const [user, setUser] = useState(null);
@@ -137,6 +153,9 @@ export default function PlayTracker() {
   if (screen === "staff" && isHeadCoach) return (
     <StaffScreen profile={profile} onBack={() => setScreen("games")} />
   );
+  if (screen === "reports") return (
+    <ReportsScreen index={gamesIndex} onBack={() => setScreen("games")} />
+  );
   if (screen === "playbook" && canEditPlaybook) return (
     <PlaybookEditor playbook={playbook} onSave={savePlaybook} onBack={() => setScreen("games")} />
   );
@@ -151,6 +170,7 @@ export default function PlayTracker() {
       profile={profile}
       onEditPlaybook={() => setScreen("playbook")}
       onViewStaff={() => setScreen("staff")}
+      onViewReports={() => setScreen("reports")}
     />
   );
 
@@ -408,8 +428,151 @@ function StaffScreen({ profile, onBack }) {
   );
 }
 
+// =================== REPORTS ===================
+function ReportsScreen({ index, onBack }) {
+  const [selected, setSelected] = useState(new Set());
+  const [view, setView] = useState("select");
+  const [reportGames, setReportGames] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  function toggleGame(id) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAll() { setSelected(new Set(index.map((g) => g.id))); }
+  function clearAll() { setSelected(new Set()); }
+
+  async function generate() {
+    if (selected.size === 0) return;
+    setLoading(true);
+    const { data } = await supabase.from("games").select("id, label, created_at, plays").in("id", [...selected]);
+    setReportGames(data || []);
+    setView("report");
+    setLoading(false);
+  }
+
+  if (view === "report") {
+    return <MultiGameReport games={reportGames} onBack={() => setView("select")} />;
+  }
+
+  return (
+    <Shell subtitle="Reports" onBack={onBack}>
+      <div style={{ padding: 16 }}>
+        <div style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 16, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
+          Select one or more games to build a combined tendencies report.
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699" }}>
+            {selected.size} of {index.length} selected
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={selectAll} style={{ background: "none", border: "none", color: "#f5c518", fontSize: 13, cursor: "pointer", fontFamily: FONT_BODY }}>All</button>
+            <button onClick={clearAll} style={{ background: "none", border: "none", color: "#7a8699", fontSize: 13, cursor: "pointer", fontFamily: FONT_BODY }}>Clear</button>
+          </div>
+        </div>
+
+        {index.length === 0 ? (
+          <div style={{ color: "#4a5568", textAlign: "center", padding: 40, fontSize: 15 }}>No games yet.</div>
+        ) : index.map((g) => {
+          const on = selected.has(g.id);
+          return (
+            <button key={g.id} onClick={() => toggleGame(g.id)} style={{
+              display: "flex", alignItems: "center", gap: 14, width: "100%", textAlign: "left",
+              background: on ? "#141a24" : "#11161f",
+              border: `1px solid ${on ? "#f5c518" : "#1d2530"}`,
+              borderRadius: 12, padding: "14px 16px", marginBottom: 8, cursor: "pointer",
+            }}>
+              <div style={{
+                width: 22, height: 22, borderRadius: 6, border: `2px solid ${on ? "#f5c518" : "#2a3543"}`,
+                background: on ? "#f5c518" : "transparent", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                {on && <span style={{ color: "#0a0e14", fontSize: 14, fontWeight: 700, lineHeight: 1 }}>✓</span>}
+              </div>
+              <div>
+                <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17, color: "#f4f4f0" }}>{g.label}</div>
+                <div style={{ fontSize: 12, color: "#7a8699", marginTop: 2 }}>{new Date(g.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</div>
+              </div>
+            </button>
+          );
+        })}
+
+        <button onClick={generate} disabled={selected.size === 0 || loading} style={{
+          width: "100%", marginTop: 12, padding: "18px", borderRadius: 12, border: "none",
+          background: selected.size > 0 ? "#f5c518" : "#1d2530",
+          color: selected.size > 0 ? "#0a0e14" : "#4a5568",
+          fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: 1.5,
+          textTransform: "uppercase", cursor: selected.size > 0 ? "pointer" : "not-allowed",
+        }}>{loading ? "Building…" : `Generate Report · ${selected.size} Game${selected.size === 1 ? "" : "s"}`}</button>
+      </div>
+    </Shell>
+  );
+}
+
+function MultiGameReport({ games, onBack }) {
+  const allPlays = games.flatMap((g) => g.plays || []);
+  const tendencies = calcTendencies(allPlays);
+
+  const gameRows = games
+    .map((g) => {
+      const plays = g.plays || [];
+      const yards = plays.reduce((s, p) => s + (p.yards || 0), 0);
+      return { label: g.label, date: g.created_at, count: plays.length, yards, avg: plays.length ? (yards / plays.length).toFixed(1) : "0.0" };
+    })
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  return (
+    <Shell subtitle={`Report · ${games.length} Game${games.length === 1 ? "" : "s"}`} onBack={onBack}>
+      <div style={{ padding: 16 }}>
+        {/* Summary bar */}
+        <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+          <Stat label="Total Plays" value={allPlays.length} />
+          <Stat label="Total Yds" value={tendencies.totalYards} />
+          <Stat label="Yds / Play" value={tendencies.avg} accent />
+        </div>
+
+        {/* Per-game breakdown */}
+        <Section label="Games Included">
+          {gameRows.map((g, i) => (
+            <div key={i} style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #1d2530" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>{g.label}</div>
+                  <div style={{ fontSize: 12, color: "#7a8699", marginTop: 2 }}>{new Date(g.date).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, color: "#f5c518" }}>{g.yards} yds</div>
+                  <div style={{ fontSize: 12, color: "#7a8699" }}>{g.count} plays · {g.avg} avg</div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </Section>
+
+        {allPlays.length === 0 ? (
+          <div style={{ textAlign: "center", color: "#4a5568", padding: "40px 0", fontSize: 15 }}>No plays logged in the selected games.</div>
+        ) : (
+          <>
+            <Breakdown title="Run vs Pass" data={tendencies.byGain} total={allPlays.length} />
+            <Breakdown title="By Personnel" data={tendencies.byPersonnel} total={allPlays.length} />
+            <Breakdown title="By Formation" data={tendencies.byFormation} total={allPlays.length} />
+            <Breakdown title="By Play Call" data={tendencies.byPlay} total={allPlays.length} />
+            <Breakdown title="By Hash" data={tendencies.byHash} total={allPlays.length} />
+            <Breakdown title="By Down" data={tendencies.byDown} total={allPlays.length} keyFmt={ordinal} />
+            <CarrierBreakdown data={tendencies.byCarrier} />
+          </>
+        )}
+      </div>
+    </Shell>
+  );
+}
+
 // =================== GAMES LIST ===================
-function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSignOut, onEditPlaybook, onViewStaff, isHeadCoach, canEditPlaybook, profile }) {
+function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSignOut, onEditPlaybook, onViewStaff, onViewReports, isHeadCoach, canEditPlaybook, profile }) {
   const [showNew, setShowNew] = useState(false);
   const [label, setLabel] = useState("");
   const [confirmDel, setConfirmDel] = useState(null);
@@ -421,6 +584,7 @@ function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSi
         <div style={{ display: "flex", gap: 8 }}>
           {isHeadCoach && <button onClick={onViewStaff} style={headerBtn}>Staff</button>}
           {canEditPlaybook && <button onClick={onEditPlaybook} style={headerBtn}>Playbook</button>}
+          <button onClick={onViewReports} style={headerBtn}>Reports</button>
           <button onClick={onSignOut} style={headerBtn}>Sign Out</button>
         </div>
       }
@@ -656,21 +820,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   }
 
-  const tendencies = useMemo(() => {
-    const byPersonnel = {}, byFormation = {}, byPlay = {}, byGain = {}, byDown = {}, byHash = {}, byCarrier = {};
-    let totalYards = 0;
-    plays.forEach((p) => {
-      totalYards += p.yards;
-      for (const [obj, k] of [[byPersonnel, p.personnel], [byFormation, p.formation], [byPlay, p.play], [byGain, p.gainType || "—"], [byDown, p.down], [byHash, p.hash]]) {
-        (obj[k] ??= { count: 0, yards: 0 }); obj[k].count++; obj[k].yards += p.yards;
-      }
-      if (p.carrier) {
-        const k = `#${p.carrier}`;
-        (byCarrier[k] ??= { count: 0, yards: 0 }); byCarrier[k].count++; byCarrier[k].yards += p.yards;
-      }
-    });
-    return { byPersonnel, byFormation, byPlay, byGain, byDown, byHash, byCarrier, totalYards, avg: plays.length ? (totalYards / plays.length).toFixed(1) : "0.0" };
-  }, [plays]);
+  const tendencies = useMemo(() => calcTendencies(plays), [plays]);
 
   return (
     <Shell subtitle={label} onBack={onBack}

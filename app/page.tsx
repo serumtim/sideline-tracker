@@ -784,6 +784,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
   const [carrier, setCarrier] = useState("");
   const [tacklerPos, setTacklerPos] = useState("");
   const [tacklerNum, setTacklerNum] = useState("");
+  const [passer, setPasser] = useState("");
   const [fumbleForcerPos, setFumbleForcerPos] = useState("");
   const [fumbleForcerNum, setFumbleForcerNum] = useState("");
   const [fumbleRecovery, setFumbleRecovery] = useState("");
@@ -814,6 +815,13 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
     return () => { supabase.removeChannel(channel); };
   }, [id]);
 
+  useEffect(() => {
+    if (playType === "Pass" && !passer) {
+      const last = plays.find(p => p.passer);
+      if (last?.passer) setPasser(last.passer);
+    }
+  }, [playType]);
+
   const persist = useCallback(async (nextPlays) => {
     try { await supabase.from("games").update({ plays: nextPlays }).eq("id", id); }
     catch (e) { console.error(e); }
@@ -822,6 +830,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
   function toggle(list, setList, val) { setList(list.includes(val) ? list.filter((x) => x !== val) : [...list, val]); }
 
   const usedCarriers = useMemo(() => { const s = new Set(); plays.forEach((p) => p.carrier && s.add(p.carrier)); return [...s].sort((a, b) => a - b); }, [plays]);
+  const usedPassers = useMemo(() => { const s = new Set(); plays.forEach((p) => p.passer && s.add(p.passer)); return [...s].sort((a, b) => a - b); }, [plays]);
   const usedTacklers = useMemo(() => { const s = new Set(); plays.forEach((p) => p.tacklerNum && s.add(p.tacklerNum)); return [...s].sort((a, b) => a - b); }, [plays]);
   const topTacklers = useMemo(() => { const c = {}; plays.forEach((p) => { if (p.tacklerNum) c[p.tacklerNum] = (c[p.tacklerNum] || 0) + 1; }); return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, 3); }, [plays]);
   const defPosMap = useMemo(() => {
@@ -837,6 +846,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
       rpoTags: [...rpoTags], rpoPlayer: rpoTags.length > 0 ? rpoPlayer : "",
       motion, motionPlayer: motion !== "None" ? motionPlayer : "",
       hash, down, distance, play, playType, yards: y,
+      passer: playType === "Pass" && gainType !== "Sack" ? passer.trim() : "",
       gainType, incomplete, carrier: incomplete ? "" : carrier.trim(),
       tacklerPos, tacklerNum: tacklerNum.trim(),
       tackler: tacklerPos || tacklerNum ? `${tacklerPos}${tacklerNum ? " #" + tacklerNum : ""}` : "—",
@@ -961,6 +971,12 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
                   </div>
                 )}
               </Section>
+              {playType === "Pass" && gainType !== "Sack" && (
+                <Section label="Passer #">
+                  {usedPassers.length > 0 && <Grid>{usedPassers.map((n) => <Chip key={n} active={passer === n} onClick={() => setPasser(passer === n ? "" : n)}>#{n}</Chip>)}</Grid>}
+                  <input value={passer} onChange={(e) => setPasser(e.target.value.replace(/[^0-9]/g, ""))} placeholder="QB jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: usedPassers.length ? 10 : 0 }} />
+                </Section>
+              )}
               {gainType === "Fumble" && (
                 <Section label="Fumble Details">
                   <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who forced the fumble?</div>
@@ -1029,7 +1045,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
                 <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${p.gainType === "TD" ? "#3ddc84" : (p.incomplete || p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Sack") ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518"}` }}>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>{ordinal(p.down)} &amp; {p.distance} · {p.hash} · {p.personnel} {p.formation}{p.formTags.length ? ` ${p.formTags.join(" ")}` : ""}</div>
-                    <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{p.play}{p.position || p.rpoTags?.length ? ` · ${p.position ? p.position + " " : ""}${p.rpoTags?.join("/")}${p.rpoTags?.length && p.rpoPlayer ? " (" + p.rpoPlayer + ")" : ""}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{p.gainType === "Fumble" ? ` · frc ${p.fumbleForcer || "—"}${p.fumbleRecovery ? " · " + p.fumbleRecovery.toLowerCase() + " rec" : ""}` : ""}{p.gainType === "INT" ? ` · int ${p.intBy || "—"}${p.intReturn ? " · " + p.intReturn + " yd ret" : ""}` : ""}{p.gainType !== "INT" && p.gainType !== "Fumble" ? ` · tkl ${p.tackler}` : ""}</div>
+                    <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{p.play}{p.position || p.rpoTags?.length ? ` · ${p.position ? p.position + " " : ""}${p.rpoTags?.join("/")}${p.rpoTags?.length && p.rpoPlayer ? " (" + p.rpoPlayer + ")" : ""}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.passer ? ` · QB #${p.passer}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{p.gainType === "Fumble" ? ` · frc ${p.fumbleForcer || "—"}${p.fumbleRecovery ? " · " + p.fumbleRecovery.toLowerCase() + " rec" : ""}` : ""}{p.gainType === "INT" ? ` · int ${p.intBy || "—"}${p.intReturn ? " · " + p.intReturn + " yd ret" : ""}` : ""}{p.gainType !== "INT" && p.gainType !== "Fumble" ? ` · tkl ${p.tackler}` : ""}</div>
                   </div>
                   <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, minWidth: 44, textAlign: "right", color: p.gainType === "TD" ? "#3ddc84" : (p.incomplete || p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Sack") ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518" }}>
                     {p.gainType === "INT" ? "INT" : p.gainType === "Safety" ? "SAF" : p.gainType === "TD" ? "TD" : p.gainType === "Sack" ? "SCK" : p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}
@@ -1057,6 +1073,14 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
             const fumbles = plays.filter(p => p.gainType === "Fumble").length;
             const sacks = plays.filter(p => p.gainType === "Sack").length;
             const safeties = plays.filter(p => p.gainType === "Safety").length;
+            const qbStats = {};
+            plays.filter(p => p.playType === "Pass" && p.passer && p.gainType !== "Sack").forEach(p => {
+              const q = qbStats[p.passer] ??= { att: 0, comp: 0, yards: 0, tds: 0, ints: 0 };
+              q.att++;
+              if (!p.incomplete && p.gainType !== "INT") { q.comp++; q.yards += p.yards; }
+              if (p.gainType === "TD") q.tds++;
+              if (p.gainType === "INT") q.ints++;
+            });
             const bsRow = (label, value) => (
               <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #1d2530" }}>
                 <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 1, textTransform: "uppercase", color: "#7a8699" }}>{label}</span>
@@ -1070,6 +1094,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
                   {bsRow("Total", `${plays.length} plays · ${rushYards + passYards >= 0 ? "+" : ""}${rushYards + passYards} yds`)}
                   {bsRow("Rush", `${rushPlays.length} att · ${rushYards >= 0 ? "+" : ""}${rushYards} yds${rushTDs ? ` · ${rushTDs} TD` : ""}${sacks ? ` · ${sacks} sack${sacks > 1 ? "s" : ""}` : ""}`)}
                   {bsRow("Pass", `${passComp}/${passPlays.length} · ${passYards >= 0 ? "+" : ""}${passYards} yds${passTDs ? ` · ${passTDs} TD` : ""}${ints ? ` · ${ints} INT` : ""}`)}
+                  {Object.entries(qbStats).map(([num, s]) => bsRow(`QB #${num}`, `${s.comp}/${s.att} · ${s.yards >= 0 ? "+" : ""}${s.yards} yds${s.tds ? " · " + s.tds + " TD" : ""}${s.ints ? " · " + s.ints + " INT" : ""}`))}
                   {(fumbles > 0 || safeties > 0) && bsRow("Turnovers", `${fumbles ? fumbles + " fumble" + (fumbles > 1 ? "s" : "") : ""}${fumbles && safeties ? " · " : ""}${safeties ? safeties + " safety" : ""}`)}
                 </div>
                 <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>

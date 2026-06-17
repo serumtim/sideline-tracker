@@ -769,7 +769,6 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
   const [personnel, setPersonnel] = useState("");
   const [formation, setFormation] = useState("");
   const [formTags, setFormTags] = useState([]);
-  const [position, setPosition] = useState("");
   const [rpoTags, setRpoTags] = useState([]);
   const [rpoPlayer, setRpoPlayer] = useState("");
   const [motion, setMotion] = useState("None");
@@ -844,7 +843,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
     if (!ready) return;
     const y = incomplete ? 0 : (parseInt(yards, 10) || 0);
     const newPlay = {
-      id: Date.now() + Math.random(), personnel: personnel || "—", formation, formTags: [...formTags], position,
+      id: Date.now() + Math.random(), personnel: personnel || "—", formation, formTags: [...formTags],
       rpoTags: [...rpoTags], rpoPlayer: rpoTags.length > 0 ? rpoPlayer : "",
       motion, motionPlayer: motion !== "None" ? motionPlayer : "",
       hash, down, distance, play, playType, yards: y,
@@ -870,7 +869,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
     }
     setPlay(""); setPlayType(""); setRunCarrier(""); setYards(""); setGainType(""); setIncomplete(false);
     setCarrier(""); setTacklerPos(""); setTacklerNum(""); setMotion("None"); setMotionPlayer("");
-    setFormTags([]); setPosition(""); setRpoTags([]); setRpoPlayer("");
+    setFormTags([]); setRpoTags([]); setRpoPlayer("");
     setFumbleForcerPos(""); setFumbleForcerNum(""); setFumbleRecovery("");
     setIntByPos(""); setIntByNum(""); setIntReturn("0");
   }
@@ -878,9 +877,9 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
   async function deletePlay(pid) { const next = plays.filter((p) => p.id !== pid); setPlays(next); persist(next); }
 
   function exportCSV() {
-    const headers = ["#", "Personnel", "Formation", "Form Tags", "Pos", "RPO", "RPO Player", "Motion Player", "Motion", "Hash", "Down", "Distance", "Play", "Gain Type", "Yards", "Incomplete", "Ball Carrier", "Tackled By"];
+    const headers = ["#", "Personnel", "Formation", "Form Tags", "RPO", "RPO Player", "Motion Player", "Motion", "Hash", "Down", "Distance", "Play", "Gain Type", "Yards", "Incomplete", "Ball Carrier", "Tackled By"];
     const ordered = [...plays].reverse();
-    const rows = ordered.map((p, i) => [i + 1, p.personnel, p.formation, p.formTags.join(" "), p.position, p.rpoTags.join(" "), p.rpoTags.length > 0 ? (p.rpoPlayer || "") : "", p.motion !== "None" ? (p.motionPlayer || "") : "", p.motion, p.hash, ordinal(p.down), p.distance, (p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play, p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", p.carrier || "", p.tackler]);
+    const rows = ordered.map((p, i) => [i + 1, p.personnel, p.formation, (p.formTags || []).join(" "), (p.rpoTags || []).join(" "), p.rpoTags?.length > 0 ? (p.rpoPlayer || "") : "", p.motion !== "None" ? (p.motionPlayer || "") : "", p.motion, p.hash, ordinal(p.down), p.distance, (p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play, p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", p.carrier || "", p.tackler]);
     const esc = (v) => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     const csv = [headers, ...rows].map((r) => r.map(esc).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -942,7 +941,6 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
                 <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", margin: "12px 0 8px" }}>Play</div>
                 <Grid>{RUN_PLAYS.map((p) => <Chip key={p} active={play === p && playType === "Run"} onClick={() => { setPlay(p); setPlayType("Run"); }}>{p}</Chip>)}</Grid>
               </Section>
-              <Section label="Position"><Grid>{POSITIONS.map((p) => <Chip key={p} active={position === p} onClick={() => setPosition(position === p ? "" : p)}>{p}</Chip>)}</Grid></Section>
               {sec.rpo && <Section label="RPO Tags · tap multiple">
                 <Grid>{RPO_TAGS.map((t) => <Chip key={t} active={rpoTags.includes(t)} onClick={() => toggle(rpoTags, setRpoTags, t)}>{t}</Chip>)}</Grid>
                 {rpoTags.length > 0 && (
@@ -1053,7 +1051,7 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
                 <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${p.gainType === "TD" ? "#3ddc84" : (p.incomplete || p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Sack") ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518"}` }}>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>{ordinal(p.down)} &amp; {p.distance} · {p.hash} · {p.personnel} {p.formation}{p.formTags.length ? ` ${p.formTags.join(" ")}` : ""}</div>
-                    <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{(p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play}{p.position || p.rpoTags?.length ? ` · ${p.position ? p.position + " " : ""}${p.rpoTags?.join("/")}${p.rpoTags?.length && p.rpoPlayer ? " (" + p.rpoPlayer + ")" : ""}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.passer ? ` · QB #${p.passer}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{p.gainType === "Fumble" ? ` · frc ${p.fumbleForcer || "—"}${p.fumbleRecovery ? " · " + p.fumbleRecovery.toLowerCase() + " rec" : ""}` : ""}{p.gainType === "INT" ? ` · int ${p.intBy || "—"}${p.intReturn ? " · " + p.intReturn + " yd ret" : ""}` : ""}{p.gainType !== "INT" && p.gainType !== "Fumble" ? ` · tkl ${p.tackler}` : ""}</div>
+                    <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{(p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play}{p.rpoTags?.length ? ` · ${p.rpoTags.join("/")}${p.rpoPlayer ? " (" + p.rpoPlayer + ")" : ""}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.passer ? ` · QB #${p.passer}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{p.gainType === "Fumble" ? ` · frc ${p.fumbleForcer || "—"}${p.fumbleRecovery ? " · " + p.fumbleRecovery.toLowerCase() + " rec" : ""}` : ""}{p.gainType === "INT" ? ` · int ${p.intBy || "—"}${p.intReturn ? " · " + p.intReturn + " yd ret" : ""}` : ""}{p.gainType !== "INT" && p.gainType !== "Fumble" ? ` · tkl ${p.tackler}` : ""}</div>
                   </div>
                   <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, minWidth: 44, textAlign: "right", color: p.gainType === "TD" ? "#3ddc84" : (p.incomplete || p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Sack") ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518" }}>
                     {p.gainType === "INT" ? "INT" : p.gainType === "Safety" ? "SAF" : p.gainType === "TD" ? "TD" : p.gainType === "Sack" ? "SCK" : p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}

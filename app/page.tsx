@@ -19,12 +19,24 @@ const DEFAULT_PLAYBOOK = {
   runPlays: ["Buck", "Power", "Trojan", "Counter", "Jet", "Belly", "Trap", "ISO"],
   passPlays: ["Snag", "Stick", "Vert", "Flood", "Waggle", "Pig", "Smash", "Hitches"],
   sections: {
-    personnel: true,
-    formTags: true,
-    motion: true,
-    rpo: true,
-    carrier: true,
-    tackler: true,
+    personnel: true, formTags: true, motion: true, rpo: true, carrier: true, tackler: true,
+  },
+  // Defensive — opponent's offense
+  oppPersonnel: ["11", "12", "21", "22", "Jumbo"],
+  oppFormations: ["Spread", "Pro", "Shotgun", "I-Form", "Pistol"],
+  oppFormTags: ["Over", "Under", "Trips", "Empty", "Bunch"],
+  oppMotions: ["Jet", "Orbit", "Shift"],
+  oppRunPlays: ["Inside Zone", "Outside Zone", "Counter", "Power", "Toss"],
+  oppPassPlays: ["RPO", "Screen", "Quick Game", "Dropback", "PA"],
+  // Defensive — our calls
+  defFronts: ["4-3", "3-4", "4-4", "Bear", "Nickel", "Dime"],
+  defCoverages: ["Cover 0", "Cover 1", "Cover 2", "Cover 3", "Cover 4", "Man", "Zone"],
+  defBlitz: ["None", "A-Gap", "B-Gap", "Edge", "Corner", "Safety"],
+  fieldBdry: ["Field", "Boundary", "Middle"],
+  defSections: {
+    oppPersonnel: true, oppFormTags: true, oppMotion: true,
+    defFront: true, defCoverage: true, defBlitz: true,
+    carrier: true, tackler: true, fieldBdry: true,
   },
 };
 
@@ -37,6 +49,27 @@ const SECTION_LABELS = {
   runPlay: "Run Play", rpoTags: "RPO Tags", passPlay: "Pass Play",
   result: "Result", carrier: "Ball Carrier", tackler: "Tackled By",
 };
+
+const DEFAULT_DEF_SECTION_ORDER = ["hash", "fieldBdry", "downDistance", "oppPersonnel", "oppFormation", "oppFormTags", "oppMotion", "oppRunPlay", "oppPassPlay", "result", "defFront", "defCoverage", "defBlitz", "carrier", "tackler"];
+const DEFAULT_DEF_LAYOUT = { sectionOrder: [...DEFAULT_DEF_SECTION_ORDER], chipOrder: {} };
+
+const DEF_SECTION_LABELS = {
+  hash: "Hash", fieldBdry: "Field / Boundary", downDistance: "Down & Distance",
+  oppPersonnel: "Their Personnel", oppFormation: "Their Formation", oppFormTags: "Their Formation Tags",
+  oppMotion: "Their Motion", oppRunPlay: "Their Run Play", oppPassPlay: "Their Pass Play",
+  result: "Result", defFront: "Our Front", defCoverage: "Our Coverage",
+  defBlitz: "Blitz Tag", carrier: "Their Ball Carrier #", tackler: "Our Tackler",
+};
+
+function mergeLayout(saved) {
+  if (saved && (saved.offense !== undefined || saved.defense !== undefined)) {
+    return {
+      offense: { ...DEFAULT_LAYOUT, ...saved.offense },
+      defense: { ...DEFAULT_DEF_LAYOUT, ...saved.defense },
+    };
+  }
+  return { offense: { ...DEFAULT_LAYOUT, ...(saved || {}) }, defense: DEFAULT_DEF_LAYOUT };
+}
 
 const US_STATES = [
   "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA",
@@ -65,6 +98,28 @@ function calcTendencies(plays) {
   return { byPersonnel, byFormation, byPlay, byGain, byDown, byHash, byCarrier, totalYards, avg: plays.length ? (totalYards / plays.length).toFixed(1) : "0.0" };
 }
 
+function calcDefTendencies(plays) {
+  const byPersonnel = {}, byFormation = {}, byPlay = {}, byGain = {}, byDown = {}, byHash = {}, byCarrier = {}, byFront = {}, byCoverage = {}, byBlitz = {}, byFieldBdry = {};
+  let totalYards = 0;
+  plays.forEach((p) => {
+    totalYards += p.yards;
+    for (const [obj, k] of [
+      [byPersonnel, p.oppPersonnel || "—"], [byFormation, p.oppFormation || "—"],
+      [byPlay, p.play || "—"], [byGain, p.gainType || "—"],
+      [byDown, p.down], [byHash, p.hash],
+      [byFront, p.front || "—"], [byCoverage, p.coverage || "—"],
+      [byBlitz, p.blitz || "None"], [byFieldBdry, p.fieldBdry || "—"],
+    ]) {
+      (obj[k] ??= { count: 0, yards: 0 }); obj[k].count++; obj[k].yards += p.yards;
+    }
+    if (p.carrier) {
+      const k = `#${p.carrier}`;
+      (byCarrier[k] ??= { count: 0, yards: 0 }); byCarrier[k].count++; byCarrier[k].yards += p.yards;
+    }
+  });
+  return { byPersonnel, byFormation, byPlay, byGain, byDown, byHash, byCarrier, byFront, byCoverage, byBlitz, byFieldBdry, totalYards, avg: plays.length ? (totalYards / plays.length).toFixed(1) : "0.0" };
+}
+
 // =================== ROOT ===================
 export default function PlayTracker() {
   const [user, setUser] = useState(null);
@@ -76,7 +131,7 @@ export default function PlayTracker() {
   const [activeId, setActiveId] = useState(null);
   const [loadingIndex, setLoadingIndex] = useState(true);
   const [playbook, setPlaybook] = useState(DEFAULT_PLAYBOOK);
-  const [layout, setLayout] = useState(DEFAULT_LAYOUT);
+  const [layout, setLayout] = useState({ offense: DEFAULT_LAYOUT, defense: DEFAULT_DEF_LAYOUT });
 
   const isHeadCoach = profile?.role !== "assistant";
   const canEditPlaybook = isHeadCoach || profile?.can_edit_playbook === true;
@@ -104,7 +159,7 @@ export default function PlayTracker() {
     if (!targetId) return;
     try {
       const { data } = await supabase.from("team_layout").select("layout").eq("user_id", targetId).maybeSingle();
-      if (data?.layout) setLayout({ ...DEFAULT_LAYOUT, ...data.layout });
+      if (data?.layout) setLayout(mergeLayout(data.layout));
     } catch { /* table may not exist yet */ }
   }
 
@@ -148,7 +203,7 @@ export default function PlayTracker() {
       if (event === "SIGNED_IN" && session?.user) {
         await initUser(session.user);
       } else if (event === "SIGNED_OUT") {
-        setUser(null); setProfile(null); setPlaybook(DEFAULT_PLAYBOOK); setLayout(DEFAULT_LAYOUT);
+        setUser(null); setProfile(null); setPlaybook(DEFAULT_PLAYBOOK); setLayout({ offense: DEFAULT_LAYOUT, defense: DEFAULT_DEF_LAYOUT });
         setGamesIndex([]); setScreen("games"); setActiveId(null); setLoadingIndex(true);
       }
     });
@@ -162,7 +217,7 @@ export default function PlayTracker() {
     const channel = supabase
       .channel(`layout-${targetId}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "team_layout", filter: `user_id=eq.${targetId}` },
-        (payload) => { if (payload.new?.layout) setLayout({ ...DEFAULT_LAYOUT, ...payload.new.layout }); })
+        (payload) => { if (payload.new?.layout) setLayout(mergeLayout(payload.new.layout)); })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [user?.id, profile?.role, profile?.team_id]);
@@ -171,7 +226,7 @@ export default function PlayTracker() {
     if (!isHeadCoach) return;
     const { data, error } = await supabase
       .from("games")
-      .insert({ label: label.trim() || "Untitled Game", plays: [], user_id: user.id })
+      .insert({ label: label.trim() || "Untitled Game", offensive_plays: [], defensive_plays: [], user_id: user.id })
       .select("id, label, created_at")
       .single();
     if (error || !data) { console.error("createGame failed:", error?.message); return; }
@@ -503,7 +558,7 @@ function ReportsScreen({ index, onBack }) {
   async function generate() {
     if (selected.size === 0) return;
     setLoading(true);
-    const { data } = await supabase.from("games").select("id, label, created_at, plays").in("id", [...selected]);
+    const { data } = await supabase.from("games").select("id, label, created_at, offensive_plays, defensive_plays").in("id", [...selected]);
     setReportGames(data || []);
     setView("report");
     setLoading(false);
@@ -568,12 +623,15 @@ function ReportsScreen({ index, onBack }) {
 }
 
 function MultiGameReport({ games, onBack }) {
-  const allPlays = games.flatMap((g) => g.plays || []);
-  const tendencies = calcTendencies(allPlays);
+  const [reportSide, setReportSide] = useState("offense");
+  const allOffPlays = games.flatMap((g) => g.offensive_plays || []);
+  const allDefPlays = games.flatMap((g) => g.defensive_plays || []);
+  const tendencies = calcTendencies(allOffPlays);
+  const defTendencies = calcDefTendencies(allDefPlays);
 
   const gameRows = games
     .map((g) => {
-      const plays = g.plays || [];
+      const plays = g.offensive_plays || [];
       const yards = plays.reduce((s, p) => s + (p.yards || 0), 0);
       return { label: g.label, date: g.created_at, count: plays.length, yards, avg: plays.length ? (yards / plays.length).toFixed(1) : "0.0" };
     })
@@ -582,14 +640,11 @@ function MultiGameReport({ games, onBack }) {
   return (
     <Shell subtitle={`Report · ${games.length} Game${games.length === 1 ? "" : "s"}`} onBack={onBack}>
       <div style={{ padding: 16 }}>
-        {/* Summary bar */}
-        <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
-          <Stat label="Total Plays" value={allPlays.length} />
-          <Stat label="Total Yds" value={tendencies.totalYards} />
-          <Stat label="Yds / Play" value={tendencies.avg} accent />
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <button onClick={() => setReportSide("offense")} style={modeBtn(reportSide === "offense", true)}>Offense</button>
+          <button onClick={() => setReportSide("defense")} style={modeBtn(reportSide === "defense")}>Defense</button>
         </div>
 
-        {/* Per-game breakdown */}
         <Section label="Games Included">
           {gameRows.map((g, i) => (
             <div key={i} style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #1d2530" }}>
@@ -607,18 +662,42 @@ function MultiGameReport({ games, onBack }) {
           ))}
         </Section>
 
-        {allPlays.length === 0 ? (
-          <div style={{ textAlign: "center", color: "#4a5568", padding: "40px 0", fontSize: 15 }}>No plays logged in the selected games.</div>
+        {reportSide === "offense" ? (
+          allOffPlays.length === 0 ? (
+            <div style={{ textAlign: "center", color: "#4a5568", padding: "40px 0", fontSize: 15 }}>No offensive plays in selected games.</div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+                <Stat label="Total Plays" value={allOffPlays.length} /><Stat label="Total Yds" value={tendencies.totalYards} /><Stat label="Yds / Play" value={tendencies.avg} accent />
+              </div>
+              <Breakdown title="Run vs Pass" data={tendencies.byGain} total={allOffPlays.length} />
+              <Breakdown title="By Personnel" data={tendencies.byPersonnel} total={allOffPlays.length} />
+              <Breakdown title="By Formation" data={tendencies.byFormation} total={allOffPlays.length} />
+              <Breakdown title="By Play Call" data={tendencies.byPlay} total={allOffPlays.length} />
+              <Breakdown title="By Hash" data={tendencies.byHash} total={allOffPlays.length} />
+              <Breakdown title="By Down" data={tendencies.byDown} total={allOffPlays.length} keyFmt={ordinal} />
+              <CarrierBreakdown data={tendencies.byCarrier} />
+            </>
+          )
         ) : (
-          <>
-            <Breakdown title="Run vs Pass" data={tendencies.byGain} total={allPlays.length} />
-            <Breakdown title="By Personnel" data={tendencies.byPersonnel} total={allPlays.length} />
-            <Breakdown title="By Formation" data={tendencies.byFormation} total={allPlays.length} />
-            <Breakdown title="By Play Call" data={tendencies.byPlay} total={allPlays.length} />
-            <Breakdown title="By Hash" data={tendencies.byHash} total={allPlays.length} />
-            <Breakdown title="By Down" data={tendencies.byDown} total={allPlays.length} keyFmt={ordinal} />
-            <CarrierBreakdown data={tendencies.byCarrier} />
-          </>
+          allDefPlays.length === 0 ? (
+            <div style={{ textAlign: "center", color: "#4a5568", padding: "40px 0", fontSize: 15 }}>No defensive plays in selected games.</div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+                <Stat label="Total Plays" value={allDefPlays.length} /><Stat label="Yds Allowed" value={defTendencies.totalYards} /><Stat label="Yds / Play" value={defTendencies.avg} accent />
+              </div>
+              <Breakdown title="Run vs Pass" data={defTendencies.byGain} total={allDefPlays.length} />
+              <Breakdown title="By Their Personnel" data={defTendencies.byPersonnel} total={allDefPlays.length} />
+              <Breakdown title="By Their Formation" data={defTendencies.byFormation} total={allDefPlays.length} />
+              <Breakdown title="By Their Play" data={defTendencies.byPlay} total={allDefPlays.length} />
+              <Breakdown title="By Hash" data={defTendencies.byHash} total={allDefPlays.length} />
+              <Breakdown title="By Down" data={defTendencies.byDown} total={allDefPlays.length} keyFmt={ordinal} />
+              <Breakdown title="By Our Front" data={defTendencies.byFront} total={allDefPlays.length} />
+              <Breakdown title="By Our Coverage" data={defTendencies.byCoverage} total={allDefPlays.length} />
+              <CarrierBreakdown data={defTendencies.byCarrier} />
+            </>
+          )
         )}
       </div>
     </Shell>
@@ -718,36 +797,39 @@ function SortableChipItem({ id, children }) {
 
 // =================== PLAYBOOK EDITOR ===================
 function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
-  const [draft, setDraft] = useState({ ...playbook });
-  const [layoutDraft, setLayoutDraft] = useState({ ...DEFAULT_LAYOUT, ...layout });
+  const [draft, setDraft] = useState({ ...DEFAULT_PLAYBOOK, ...playbook });
+  const [layoutDraft, setLayoutDraft] = useState({
+    offense: { ...DEFAULT_LAYOUT, ...layout?.offense },
+    defense: { ...DEFAULT_DEF_LAYOUT, ...layout?.defense },
+  });
   const [editorTab, setEditorTab] = useState("arrange");
+  const [pbSide, setPbSide] = useState("offense");
   const [saving, setSaving] = useState(false);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
-  function removeItem(key, item) { setDraft((d) => ({ ...d, [key]: d[key].filter((x) => x !== item) })); }
-  function addItem(key, value) { setDraft((d) => ({ ...d, [key]: [...d[key], value] })); }
+  function removeItem(key, item) { setDraft((d) => ({ ...d, [key]: (d[key] || []).filter((x) => x !== item) })); }
+  function addItem(key, value) { setDraft((d) => ({ ...d, [key]: [...(d[key] || []), value] })); }
 
   async function handleSave() { setSaving(true); await onSave(draft); setSaving(false); onBack(); }
 
   function toggleSection(key) {
-    setDraft((d) => ({
-      ...d,
-      sections: { ...(d.sections ?? DEFAULT_PLAYBOOK.sections), [key]: !(d.sections ?? DEFAULT_PLAYBOOK.sections)[key] },
-    }));
+    setDraft((d) => ({ ...d, sections: { ...(d.sections ?? DEFAULT_PLAYBOOK.sections), [key]: !(d.sections ?? DEFAULT_PLAYBOOK.sections)[key] } }));
+  }
+  function toggleDefSection(key) {
+    setDraft((d) => ({ ...d, defSections: { ...(d.defSections ?? DEFAULT_PLAYBOOK.defSections), [key]: !(d.defSections ?? DEFAULT_PLAYBOOK.defSections)[key] } }));
   }
 
   function getLayoutChips(sectionId, baseChips) {
-    const saved = layoutDraft.chipOrder?.[sectionId];
+    const saved = layoutDraft[pbSide]?.chipOrder?.[sectionId];
     if (!saved?.length) return baseChips;
     return [...saved.filter(c => baseChips.includes(c)), ...baseChips.filter(c => !saved.includes(c))];
   }
 
   function handleSectionDragEnd({ active, over }) {
     if (!over || active.id === over.id) return;
-    const oldIdx = layoutDraft.sectionOrder.indexOf(active.id);
-    const newIdx = layoutDraft.sectionOrder.indexOf(over.id);
-    const next = { ...layoutDraft, sectionOrder: arrayMove(layoutDraft.sectionOrder, oldIdx, newIdx) };
+    const cur = layoutDraft[pbSide].sectionOrder;
+    const next = { ...layoutDraft, [pbSide]: { ...layoutDraft[pbSide], sectionOrder: arrayMove(cur, cur.indexOf(active.id), cur.indexOf(over.id)) } };
     setLayoutDraft(next); onSaveLayout(next);
   }
 
@@ -755,7 +837,7 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
     return ({ active, over }) => {
       if (!over || active.id === over.id) return;
       const cur = getLayoutChips(sectionId, baseChips);
-      const next = { ...layoutDraft, chipOrder: { ...layoutDraft.chipOrder, [sectionId]: arrayMove(cur, cur.indexOf(active.id), cur.indexOf(over.id)) } };
+      const next = { ...layoutDraft, [pbSide]: { ...layoutDraft[pbSide], chipOrder: { ...layoutDraft[pbSide].chipOrder, [sectionId]: arrayMove(cur, cur.indexOf(active.id), cur.indexOf(over.id)) } } };
       setLayoutDraft(next); onSaveLayout(next);
     };
   }
@@ -765,13 +847,27 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
     { key: "motion", label: "Shift / Motion" }, { key: "rpo", label: "RPO Tags" },
     { key: "carrier", label: "Ball Carrier" }, { key: "tackler", label: "Tackled By" },
   ];
-  const categories = [
+  const defSectionToggles = [
+    { key: "oppPersonnel", label: "Their Personnel" }, { key: "oppFormTags", label: "Their Formation Tags" },
+    { key: "oppMotion", label: "Their Motion" }, { key: "defFront", label: "Our Front" },
+    { key: "defCoverage", label: "Our Coverage" }, { key: "defBlitz", label: "Blitz Tag" },
+    { key: "carrier", label: "Their Ball Carrier" }, { key: "tackler", label: "Our Tackler" },
+    { key: "fieldBdry", label: "Field / Boundary" },
+  ];
+  const offCategories = [
     { key: "personnel", label: "Personnel Groups" }, { key: "formations", label: "Formations" },
     { key: "formTags", label: "Formation Tags" }, { key: "runPlays", label: "Run Plays" },
     { key: "passPlays", label: "Pass Plays" }, { key: "motions", label: "Motions (None is always available)" },
     { key: "positions", label: "Positions" }, { key: "rpoTags", label: "RPO Tags" },
   ];
-  const chipSections = [
+  const defCategories = [
+    { key: "oppPersonnel", label: "Their Personnel Groups" }, { key: "oppFormations", label: "Their Formations" },
+    { key: "oppFormTags", label: "Their Formation Tags" }, { key: "oppRunPlays", label: "Their Run Plays" },
+    { key: "oppPassPlays", label: "Their Pass Plays" }, { key: "oppMotions", label: "Their Motions" },
+    { key: "defFronts", label: "Our Fronts" }, { key: "defCoverages", label: "Our Coverages" },
+    { key: "defBlitz", label: "Blitz Tags" }, { key: "fieldBdry", label: "Field / Boundary" },
+  ];
+  const offChipSections = [
     { id: "personnel", label: "Personnel", chips: draft.personnel },
     { id: "formation", label: "Formations", chips: draft.formations },
     { id: "formTags", label: "Formation Tags", chips: draft.formTags },
@@ -780,6 +876,23 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
     { id: "rpoTags", label: "RPO Tags", chips: draft.rpoTags },
     { id: "passPlay", label: "Pass Plays", chips: draft.passPlays },
   ];
+  const defChipSections = [
+    { id: "oppPersonnel", label: "Their Personnel", chips: draft.oppPersonnel ?? DEFAULT_PLAYBOOK.oppPersonnel },
+    { id: "oppFormation", label: "Their Formations", chips: draft.oppFormations ?? DEFAULT_PLAYBOOK.oppFormations },
+    { id: "oppFormTags", label: "Their Formation Tags", chips: draft.oppFormTags ?? DEFAULT_PLAYBOOK.oppFormTags },
+    { id: "oppMotion", label: "Their Motions", chips: draft.oppMotions ?? DEFAULT_PLAYBOOK.oppMotions },
+    { id: "oppRunPlay", label: "Their Run Plays", chips: draft.oppRunPlays ?? DEFAULT_PLAYBOOK.oppRunPlays },
+    { id: "oppPassPlay", label: "Their Pass Plays", chips: draft.oppPassPlays ?? DEFAULT_PLAYBOOK.oppPassPlays },
+    { id: "defFront", label: "Our Fronts", chips: draft.defFronts ?? DEFAULT_PLAYBOOK.defFronts },
+    { id: "defCoverage", label: "Our Coverages", chips: draft.defCoverages ?? DEFAULT_PLAYBOOK.defCoverages },
+    { id: "defBlitz", label: "Blitz Tags", chips: draft.defBlitz ?? DEFAULT_PLAYBOOK.defBlitz },
+    { id: "fieldBdry", label: "Field / Boundary", chips: draft.fieldBdry ?? DEFAULT_PLAYBOOK.fieldBdry },
+  ];
+  const chipSections = pbSide === "offense" ? offChipSections : defChipSections;
+  const curLabels = pbSide === "offense" ? SECTION_LABELS : DEF_SECTION_LABELS;
+  const curSectionOrder = layoutDraft[pbSide]?.sectionOrder || (pbSide === "offense" ? DEFAULT_SECTION_ORDER : DEFAULT_DEF_SECTION_ORDER);
+  const curSectionToggles = pbSide === "offense" ? sectionToggles : defSectionToggles;
+  const curCategories = pbSide === "offense" ? offCategories : defCategories;
 
   return (
     <Shell subtitle="Edit Playbook" onBack={onBack}>
@@ -796,6 +909,11 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
       </div>
 
       <div style={{ padding: 16 }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+          <button onClick={() => setPbSide("offense")} style={modeBtn(pbSide === "offense", true)}>Offense</button>
+          <button onClick={() => setPbSide("defense")} style={modeBtn(pbSide === "defense")}>Defense</button>
+        </div>
+
         {editorTab === "arrange" && (
           <>
             <div style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 20, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
@@ -804,11 +922,11 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
 
             <Section label="Form Section Order">
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleSectionDragEnd}>
-                <SortableContext items={layoutDraft.sectionOrder} strategy={verticalListSortingStrategy}>
+                <SortableContext items={curSectionOrder} strategy={verticalListSortingStrategy}>
                   <div style={{ background: "#141a24", border: "1px solid #2a3543", borderRadius: 12, padding: "0 12px" }}>
-                    {layoutDraft.sectionOrder.map((key) => (
+                    {curSectionOrder.map((key) => (
                       <SortableRow key={key} id={key}>
-                        <span style={{ fontFamily: FONT_BODY, fontSize: 15, color: "#c4cdda" }}>{SECTION_LABELS[key]}</span>
+                        <span style={{ fontFamily: FONT_BODY, fontSize: 15, color: "#c4cdda" }}>{curLabels[key] || key}</span>
                       </SortableRow>
                     ))}
                   </div>
@@ -841,10 +959,12 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
               Tap × to remove an item. Type a name and press + or Enter to add one.
             </div>
             <Section label="Visible Sections · toggle off sections your team doesn't use">
-              {sectionToggles.map(({ key, label }) => {
-                const on = (draft.sections ?? DEFAULT_PLAYBOOK.sections)[key];
+              {curSectionToggles.map(({ key, label }) => {
+                const bank = pbSide === "offense" ? (draft.sections ?? DEFAULT_PLAYBOOK.sections) : (draft.defSections ?? DEFAULT_PLAYBOOK.defSections);
+                const on = bank[key];
+                const doToggle = pbSide === "offense" ? toggleSection : toggleDefSection;
                 return (
-                  <div key={key} onClick={() => toggleSection(key)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 4px", borderBottom: "1px solid #1d2530", cursor: "pointer" }}>
+                  <div key={key} onClick={() => doToggle(key)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 4px", borderBottom: "1px solid #1d2530", cursor: "pointer" }}>
                     <span style={{ fontFamily: FONT_BODY, fontSize: 15, color: on ? "#f4f4f0" : "#4a5568" }}>{label}</span>
                     <div style={{ width: 44, height: 24, borderRadius: 12, background: on ? "#f5c518" : "#1d2530", position: "relative", transition: "background 0.2s", border: "1px solid " + (on ? "#f5c518" : "#2a3543") }}>
                       <div style={{ position: "absolute", top: 2, left: on ? 22 : 2, width: 18, height: 18, borderRadius: 9, background: on ? "#0a0e14" : "#4a5568", transition: "left 0.2s" }} />
@@ -853,8 +973,8 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
                 );
               })}
             </Section>
-            {categories.map(({ key, label }) => (
-              <PlaybookCategory key={key} label={label} items={draft[key]}
+            {curCategories.map(({ key, label }) => (
+              <PlaybookCategory key={key} label={label} items={draft[key] ?? DEFAULT_PLAYBOOK[key] ?? []}
                 onRemove={(item) => removeItem(key, item)}
                 onAdd={(val) => addItem(key, val)} />
             ))}
@@ -904,14 +1024,27 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
   const { personnel: PERSONNEL, formations: FORMATIONS, formTags: FORM_TAGS,
     positions: POSITIONS, rpoTags: RPO_TAGS, runPlays: RUN_PLAYS, passPlays: PASS_PLAYS } = playbook;
   const sec = playbook.sections ?? DEFAULT_PLAYBOOK.sections;
+  const defSec = playbook.defSections ?? DEFAULT_PLAYBOOK.defSections;
+
+  const offLayout = layout?.offense || DEFAULT_LAYOUT;
+  const defLayout = layout?.defense || DEFAULT_DEF_LAYOUT;
 
   const sectionOrder = [
-    ...(layout?.sectionOrder || DEFAULT_SECTION_ORDER),
-    ...DEFAULT_SECTION_ORDER.filter(s => !(layout?.sectionOrder || DEFAULT_SECTION_ORDER).includes(s)),
+    ...(offLayout.sectionOrder || DEFAULT_SECTION_ORDER),
+    ...DEFAULT_SECTION_ORDER.filter(s => !(offLayout.sectionOrder || DEFAULT_SECTION_ORDER).includes(s)),
+  ];
+  const defSectionOrder = [
+    ...(defLayout.sectionOrder || DEFAULT_DEF_SECTION_ORDER),
+    ...DEFAULT_DEF_SECTION_ORDER.filter(s => !(defLayout.sectionOrder || DEFAULT_DEF_SECTION_ORDER).includes(s)),
   ];
 
   function orderedChips(sectionId, baseChips) {
-    const saved = layout?.chipOrder?.[sectionId];
+    const saved = offLayout.chipOrder?.[sectionId];
+    if (!saved?.length) return baseChips;
+    return [...saved.filter(c => baseChips.includes(c)), ...baseChips.filter(c => !saved.includes(c))];
+  }
+  function defOrderedChips(sectionId, baseChips) {
+    const saved = defLayout.chipOrder?.[sectionId];
     if (!saved?.length) return baseChips;
     return [...saved.filter(c => baseChips.includes(c)), ...baseChips.filter(c => !saved.includes(c))];
   }
@@ -924,12 +1057,27 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
   const ORD_RPO_TAGS = orderedChips("rpoTags", RPO_TAGS);
   const ORD_PASS_PLAYS = orderedChips("passPlay", PASS_PLAYS);
 
+  const ORD_OPP_PERSONNEL = defOrderedChips("oppPersonnel", playbook.oppPersonnel ?? DEFAULT_PLAYBOOK.oppPersonnel);
+  const ORD_OPP_FORMATIONS = defOrderedChips("oppFormation", playbook.oppFormations ?? DEFAULT_PLAYBOOK.oppFormations);
+  const ORD_OPP_FORM_TAGS = defOrderedChips("oppFormTags", playbook.oppFormTags ?? DEFAULT_PLAYBOOK.oppFormTags);
+  const ORD_OPP_MOTIONS = ["None", ...defOrderedChips("oppMotion", playbook.oppMotions ?? DEFAULT_PLAYBOOK.oppMotions)];
+  const ORD_OPP_RUN_PLAYS = defOrderedChips("oppRunPlay", playbook.oppRunPlays ?? DEFAULT_PLAYBOOK.oppRunPlays);
+  const ORD_OPP_PASS_PLAYS = defOrderedChips("oppPassPlay", playbook.oppPassPlays ?? DEFAULT_PLAYBOOK.oppPassPlays);
+  const ORD_DEF_FRONTS = defOrderedChips("defFront", playbook.defFronts ?? DEFAULT_PLAYBOOK.defFronts);
+  const ORD_DEF_COVERAGES = defOrderedChips("defCoverage", playbook.defCoverages ?? DEFAULT_PLAYBOOK.defCoverages);
+  const ORD_DEF_BLITZ = defOrderedChips("defBlitz", playbook.defBlitz ?? DEFAULT_PLAYBOOK.defBlitz);
+  const ORD_FIELD_BDRY = defOrderedChips("fieldBdry", playbook.fieldBdry ?? DEFAULT_PLAYBOOK.fieldBdry);
+
   const [tab, setTab] = useState("log");
   const [mode, setMode] = useState("view");
-  const [plays, setPlays] = useState([]);
+  const [side, setSide] = useState("offense");
+  const [offPlays, setOffPlays] = useState([]);
+  const [defPlays, setDefPlays] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [tendSide, setTendSide] = useState("offense");
 
+  // Offensive form state
   const [personnel, setPersonnel] = useState("");
   const [formation, setFormation] = useState("");
   const [formTags, setFormTags] = useState([]);
@@ -957,14 +1105,35 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
   const [intByNum, setIntByNum] = useState("");
   const [intReturn, setIntReturn] = useState("0");
 
+  // Defensive form state
+  const [defOppPersonnel, setDefOppPersonnel] = useState("");
+  const [defOppFormation, setDefOppFormation] = useState("");
+  const [defOppFormTags, setDefOppFormTags] = useState([]);
+  const [defOppMotion, setDefOppMotion] = useState("None");
+  const [defOppMotionPlayer, setDefOppMotionPlayer] = useState("");
+  const [defPlay, setDefPlay] = useState("");
+  const [defPlayType, setDefPlayType] = useState("");
+  const [defYards, setDefYards] = useState("");
+  const [defGainType, setDefGainType] = useState("");
+  const [defIncomplete, setDefIncomplete] = useState(false);
+  const [defCarrier, setDefCarrier] = useState("");
+  const [defFront, setDefFront] = useState("");
+  const [defCoverage, setDefCoverage] = useState("");
+  const [defBlitz, setDefBlitz] = useState("");
+  const [defTacklerPos, setDefTacklerPos] = useState("");
+  const [defTacklerNum, setDefTacklerNum] = useState("");
+  const [defFieldBdry, setDefFieldBdry] = useState("");
+
   const editing = mode === "edit";
-  const ready = editing && formation && play && (yards !== "" || incomplete);
+  const offReady = editing && formation && play && (yards !== "" || incomplete);
+  const defReady = editing && defOppFormation && defPlay && (defYards !== "" || defIncomplete);
+  const activePlays = side === "offense" ? offPlays : defPlays;
 
   const fetchGame = useCallback(async () => {
     try {
       setSyncing(true);
-      const { data } = await supabase.from("games").select("plays").eq("id", id).single();
-      if (data) setPlays(data.plays || []);
+      const { data } = await supabase.from("games").select("offensive_plays, defensive_plays").eq("id", id).single();
+      if (data) { setOffPlays(data.offensive_plays || []); setDefPlays(data.defensive_plays || []); }
     } catch (e) {}
     setSyncing(false); setLoaded(true);
   }, [id]);
@@ -975,36 +1144,41 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
     const channel = supabase
       .channel(`game-${id}`)
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "games", filter: `id=eq.${id}` },
-        (payload) => { setPlays(payload.new.plays || []); })
+        (payload) => { setOffPlays(payload.new.offensive_plays || []); setDefPlays(payload.new.defensive_plays || []); })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [id]);
 
   useEffect(() => {
     if (playType === "Pass" && !passer) {
-      const last = plays.find(p => p.passer);
+      const last = offPlays.find(p => p.passer);
       if (last?.passer) setPasser(last.passer);
     }
   }, [playType]);
 
-  const persist = useCallback(async (nextPlays) => {
-    try { await supabase.from("games").update({ plays: nextPlays }).eq("id", id); }
+  const persist = useCallback(async (nextPlays, pSide) => {
+    const col = pSide === "offense" ? "offensive_plays" : "defensive_plays";
+    try { await supabase.from("games").update({ [col]: nextPlays }).eq("id", id); }
     catch (e) { console.error(e); }
   }, [id]);
 
   function toggle(list, setList, val) { setList(list.includes(val) ? list.filter((x) => x !== val) : [...list, val]); }
 
-  const usedCarriers = useMemo(() => { const s = new Set(); plays.forEach((p) => p.carrier && s.add(p.carrier)); return [...s].sort((a, b) => a - b); }, [plays]);
-  const usedPassers = useMemo(() => { const s = new Set(); plays.forEach((p) => p.passer && s.add(p.passer)); return [...s].sort((a, b) => a - b); }, [plays]);
-  const usedTacklers = useMemo(() => { const s = new Set(); plays.forEach((p) => p.tacklerNum && s.add(p.tacklerNum)); return [...s].sort((a, b) => a - b); }, [plays]);
-  const topTacklers = useMemo(() => { const c = {}; plays.forEach((p) => { if (p.tacklerNum) c[p.tacklerNum] = (c[p.tacklerNum] || 0) + 1; }); return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, 3); }, [plays]);
-  const defPosMap = useMemo(() => {
-    const m = {}; [...plays].reverse().forEach((p) => { if (p.tacklerNum && p.tacklerPos) m[p.tacklerNum] = p.tacklerPos; }); return m;
-  }, [plays]);
+  const usedCarriers = useMemo(() => { const s = new Set(); offPlays.forEach((p) => p.carrier && s.add(p.carrier)); return [...s].sort((a, b) => a - b); }, [offPlays]);
+  const usedPassers = useMemo(() => { const s = new Set(); offPlays.forEach((p) => p.passer && s.add(p.passer)); return [...s].sort((a, b) => a - b); }, [offPlays]);
+  const usedTacklers = useMemo(() => { const s = new Set(); offPlays.forEach((p) => p.tacklerNum && s.add(p.tacklerNum)); return [...s].sort((a, b) => a - b); }, [offPlays]);
+  const topTacklers = useMemo(() => { const c = {}; offPlays.forEach((p) => { if (p.tacklerNum) c[p.tacklerNum] = (c[p.tacklerNum] || 0) + 1; }); return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, 3); }, [offPlays]);
+  const defPosMap = useMemo(() => { const m = {}; [...offPlays].reverse().forEach((p) => { if (p.tacklerNum && p.tacklerPos) m[p.tacklerNum] = p.tacklerPos; }); return m; }, [offPlays]);
   const defLabel = (num) => (defPosMap[num] ? `${defPosMap[num]} #${num}` : `#${num}`);
 
+  const defUsedCarriers = useMemo(() => { const s = new Set(); defPlays.forEach((p) => p.carrier && s.add(p.carrier)); return [...s].sort((a, b) => a - b); }, [defPlays]);
+  const defUsedTacklers = useMemo(() => { const s = new Set(); defPlays.forEach((p) => p.tacklerNum && s.add(p.tacklerNum)); return [...s].sort((a, b) => a - b); }, [defPlays]);
+  const defTopTacklers = useMemo(() => { const c = {}; defPlays.forEach((p) => { if (p.tacklerNum) c[p.tacklerNum] = (c[p.tacklerNum] || 0) + 1; }); return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, 3); }, [defPlays]);
+  const ourDefPosMap = useMemo(() => { const m = {}; [...defPlays].reverse().forEach((p) => { if (p.tacklerNum && p.tacklerPos) m[p.tacklerNum] = p.tacklerPos; }); return m; }, [defPlays]);
+  const ourDefLabel = (num) => (ourDefPosMap[num] ? `${ourDefPosMap[num]} #${num}` : `#${num}`);
+
   async function logPlay() {
-    if (!ready) return;
+    if (!offReady) return;
     const y = incomplete ? 0 : (parseInt(yards, 10) || 0);
     const newPlay = {
       id: Date.now() + Math.random(), personnel: personnel || "—", formation, formTags: [...formTags],
@@ -1021,16 +1195,10 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
       intBy: gainType === "INT" ? (`${intByPos}${intByNum ? " #" + intByNum : ""}`).trim() || "—" : "",
       intReturn: gainType === "INT" ? (parseInt(intReturn, 10) || 0) : 0,
     };
-    const next = [newPlay, ...plays];
-    setPlays(next); persist(next);
-    if (gainType === "TD" || gainType === "INT" || gainType === "Safety") {
-      setDown(1); setDistance(10);
-    } else {
-      const gotFirst = y >= distance;
-      if (gotFirst) { setDown(1); setDistance(10); }
-      else if (down < 4) { setDown(down + 1); setDistance(Math.max(distance - y, 1)); }
-      else { setDown(1); setDistance(10); }
-    }
+    const next = [newPlay, ...offPlays];
+    setOffPlays(next); persist(next, "offense");
+    if (gainType === "TD" || gainType === "INT" || gainType === "Safety") { setDown(1); setDistance(10); }
+    else { const g = y >= distance; if (g) { setDown(1); setDistance(10); } else if (down < 4) { setDown(down + 1); setDistance(Math.max(distance - y, 1)); } else { setDown(1); setDistance(10); } }
     setPlay(""); setPlayType(""); setRunCarrier(""); setYards(""); setGainType(""); setIncomplete(false);
     setCarrier(""); setTacklerPos(""); setTacklerNum(""); setMotion("None"); setMotionPlayer("");
     setFormTags([]); setRpoTags([]); setRpoPlayer("");
@@ -1038,28 +1206,82 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
     setIntByPos(""); setIntByNum(""); setIntReturn("0");
   }
 
-  async function deletePlay(pid) { const next = plays.filter((p) => p.id !== pid); setPlays(next); persist(next); }
+  async function logDefPlay() {
+    if (!defReady) return;
+    const y = defIncomplete ? 0 : (parseInt(defYards, 10) || 0);
+    const newPlay = {
+      id: Date.now() + Math.random(),
+      hash, fieldBdry: defFieldBdry, down, distance,
+      oppPersonnel: defOppPersonnel || "—", oppFormation: defOppFormation,
+      oppFormTags: [...defOppFormTags], oppMotion: defOppMotion,
+      oppMotionPlayer: defOppMotion !== "None" ? defOppMotionPlayer : "",
+      play: defPlay, playType: defPlayType,
+      yards: y, gainType: defGainType, incomplete: defIncomplete,
+      carrier: defIncomplete ? "" : defCarrier.trim(),
+      front: defFront, coverage: defCoverage, blitz: defBlitz,
+      tacklerPos: defTacklerPos, tacklerNum: defTacklerNum.trim(),
+      tackler: defTacklerPos || defTacklerNum ? `${defTacklerPos}${defTacklerNum ? " #" + defTacklerNum : ""}` : "—",
+    };
+    const next = [newPlay, ...defPlays];
+    setDefPlays(next); persist(next, "defense");
+    if (defGainType === "TD" || defGainType === "INT" || defGainType === "Safety") { setDown(1); setDistance(10); }
+    else { const g = y >= distance; if (g) { setDown(1); setDistance(10); } else if (down < 4) { setDown(down + 1); setDistance(Math.max(distance - y, 1)); } else { setDown(1); setDistance(10); } }
+    setDefPlay(""); setDefPlayType(""); setDefYards(""); setDefGainType(""); setDefIncomplete(false);
+    setDefCarrier(""); setDefTacklerPos(""); setDefTacklerNum(""); setDefOppMotion("None"); setDefOppMotionPlayer("");
+    setDefOppFormTags([]); setDefFieldBdry(""); setDefFront(""); setDefCoverage(""); setDefBlitz(""); setDefOppPersonnel("");
+  }
+
+  async function deletePlay(pid) {
+    if (side === "offense") { const n = offPlays.filter((p) => p.id !== pid); setOffPlays(n); persist(n, "offense"); }
+    else { const n = defPlays.filter((p) => p.id !== pid); setDefPlays(n); persist(n, "defense"); }
+  }
 
   function exportCSV() {
-    const headers = ["#", "Personnel", "Formation", "Form Tags", "RPO", "RPO Player", "Motion Player", "Motion", "Hash", "Down", "Distance", "Play", "Gain Type", "Yards", "Incomplete", "Ball Carrier", "Tackled By"];
-    const ordered = [...plays].reverse();
-    const rows = ordered.map((p, i) => [i + 1, p.personnel, p.formation, (p.formTags || []).join(" "), (p.rpoTags || []).join(" "), p.rpoTags?.length > 0 ? (p.rpoPlayer || "") : "", p.motion !== "None" ? (p.motionPlayer || "") : "", p.motion, p.hash, ordinal(p.down), p.distance, (p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play, p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", p.carrier || "", p.tackler]);
-    const esc = (v) => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-    const csv = [headers, ...rows].map((r) => r.map(esc).join(",")).join("\n");
+    const headers = ["Side", "#", "Hash", "Field/Bdry", "Down", "Distance",
+      "Personnel", "Formation", "Form Tags", "RPO", "RPO Player", "Motion", "Motion Player", "Play", "Gain Type", "Yards", "Incomplete", "Ball Carrier", "Tackled By",
+      "Their Personnel", "Their Formation", "Their Form Tags", "Their Motion", "Their Motion Player", "Their Play",
+      "Our Front", "Our Coverage", "Blitz", "Their Ball Carrier", "Our Tackler"];
+    const esc = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const offRows = [...offPlays].reverse().map((p, i) => [
+      "Offense", i + 1, p.hash, "", ordinal(p.down), p.distance,
+      p.personnel, p.formation, (p.formTags || []).join(" "), (p.rpoTags || []).join(" "),
+      p.rpoTags?.length > 0 ? (p.rpoPlayer || "") : "", p.motion,
+      p.motion !== "None" ? (p.motionPlayer || "") : "",
+      (p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play,
+      p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", p.carrier || "", p.tackler,
+      "", "", "", "", "", "", "", "", "", "", "",
+    ]);
+    const defRows = [...defPlays].reverse().map((p, i) => [
+      "Defense", i + 1, p.hash, p.fieldBdry || "", ordinal(p.down), p.distance,
+      "", "", "", "", "", "", "", "",
+      p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", "", "",
+      p.oppPersonnel, p.oppFormation, (p.oppFormTags || []).join(" "),
+      p.oppMotion, p.oppMotion !== "None" ? (p.oppMotionPlayer || "") : "", p.play,
+      p.front || "", p.coverage || "", p.blitz || "", p.carrier || "", p.tackler,
+    ]);
+    const csv = [headers, ...offRows, ...defRows].map((r) => r.map(esc).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob); const a = document.createElement("a");
     a.href = url; a.download = `sideline-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.csv`;
     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   }
 
-  const tendencies = useMemo(() => calcTendencies(plays), [plays]);
+  const tendencies = useMemo(() => calcTendencies(offPlays), [offPlays]);
+  const defTendencies = useMemo(() => calcDefTendencies(defPlays), [defPlays]);
 
   return (
     <Shell subtitle={label} onBack={onBack}
       right={<span style={{ fontSize: 11, color: syncing ? "#f5c518" : "#3ddc84" }}>{syncing ? "syncing…" : "● live"}</span>}>
+
+      {/* Side toggle */}
       <div style={{ display: "flex", gap: 8, padding: "12px 16px", borderBottom: "1px solid #1d2530" }}>
-        <button onClick={() => setMode("view")} style={modeBtn(mode === "view")}>👁 View</button>
-        <button onClick={() => setMode("edit")} style={modeBtn(mode === "edit", true)}>✎ Edit</button>
+        <button onClick={() => setSide("offense")} style={modeBtn(side === "offense", true)}>Offense</button>
+        <button onClick={() => setSide("defense")} style={modeBtn(side === "defense")}>Defense</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, padding: "12px 16px", borderBottom: "1px solid #1d2530" }}>
+        <button onClick={() => setMode("view")} style={modeBtn(mode === "view")}>View</button>
+        <button onClick={() => setMode("edit")} style={modeBtn(mode === "edit", true)}>Edit</button>
       </div>
 
       <div style={{ display: "flex", borderBottom: "1px solid #1d2530" }}>
@@ -1074,13 +1296,11 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
 
       {tab === "log" && (
         <div style={{ padding: 16 }}>
-          {editing && (
+          {editing && side === "offense" && (
             <>
               {sectionOrder.map((key) => {
                 const sectionMap = {
-                  hash: (
-                    <Section label="Hash"><div style={{ display: "flex", gap: 8 }}>{HASHES.map((h) => <Chip key={h} active={hash === h} onClick={() => setHash(h)} big>{h}</Chip>)}</div></Section>
-                  ),
+                  hash: (<Section label="Hash"><div style={{ display: "flex", gap: 8 }}>{HASHES.map((h) => <Chip key={h} active={hash === h} onClick={() => setHash(h)} big>{h}</Chip>)}</div></Section>),
                   downDistance: (
                     <Section label="Down & Distance">
                       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>{[1, 2, 3, 4].map((d) => <Chip key={d} active={down === d} onClick={() => setDown(d)} big>{ordinal(d)}</Chip>)}</div>
@@ -1093,24 +1313,13 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                       </div>
                     </Section>
                   ),
-                  personnel: sec.personnel ? (
-                    <Section label="Personnel"><Grid>{ORD_PERSONNEL.map((p) => <Chip key={p} active={personnel === p} onClick={() => setPersonnel(personnel === p ? "" : p)}>{p}</Chip>)}</Grid></Section>
-                  ) : null,
-                  formation: (
-                    <Section label="Formation"><Grid>{ORD_FORMATIONS.map((f) => <Chip key={f} active={formation === f} onClick={() => setFormation(f)}>{f}</Chip>)}</Grid></Section>
-                  ),
-                  formTags: sec.formTags ? (
-                    <Section label="Formation Tags · tap multiple"><Grid>{ORD_FORM_TAGS.map((t) => <Chip key={t} active={formTags.includes(t)} onClick={() => toggle(formTags, setFormTags, t)}>{t}</Chip>)}</Grid></Section>
-                  ) : null,
+                  personnel: sec.personnel ? (<Section label="Personnel"><Grid>{ORD_PERSONNEL.map((p) => <Chip key={p} active={personnel === p} onClick={() => setPersonnel(personnel === p ? "" : p)}>{p}</Chip>)}</Grid></Section>) : null,
+                  formation: (<Section label="Formation"><Grid>{ORD_FORMATIONS.map((f) => <Chip key={f} active={formation === f} onClick={() => setFormation(f)}>{f}</Chip>)}</Grid></Section>),
+                  formTags: sec.formTags ? (<Section label="Formation Tags · tap multiple"><Grid>{ORD_FORM_TAGS.map((t) => <Chip key={t} active={formTags.includes(t)} onClick={() => toggle(formTags, setFormTags, t)}>{t}</Chip>)}</Grid></Section>) : null,
                   motion: sec.motion ? (
                     <Section label="Shift / Motion">
                       <Grid>{ORD_MOTIONS.map((m) => <Chip key={m} active={motion === m} onClick={() => { setMotion(m); if (m === "None") setMotionPlayer(""); }}>{m}</Chip>)}</Grid>
-                      {motion !== "None" && (
-                        <div style={{ marginTop: 10 }}>
-                          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's in motion?</div>
-                          <Grid>{POSITIONS.map((p) => <Chip key={p} active={motionPlayer === p} onClick={() => setMotionPlayer(motionPlayer === p ? "" : p)}>{p}</Chip>)}</Grid>
-                        </div>
-                      )}
+                      {motion !== "None" && (<div style={{ marginTop: 10 }}><div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's in motion?</div><Grid>{POSITIONS.map((p) => <Chip key={p} active={motionPlayer === p} onClick={() => setMotionPlayer(motionPlayer === p ? "" : p)}>{p}</Chip>)}</Grid></div>)}
                     </Section>
                   ) : null,
                   runPlay: (
@@ -1124,17 +1333,10 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                   rpoTags: sec.rpo ? (
                     <Section label="RPO Tags · tap multiple">
                       <Grid>{ORD_RPO_TAGS.map((t) => <Chip key={t} active={rpoTags.includes(t)} onClick={() => toggle(rpoTags, setRpoTags, t)}>{t}</Chip>)}</Grid>
-                      {rpoTags.length > 0 && (
-                        <div style={{ marginTop: 10 }}>
-                          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's running the RPO?</div>
-                          <Grid>{POSITIONS.map((p) => <Chip key={p} active={rpoPlayer === p} onClick={() => setRpoPlayer(rpoPlayer === p ? "" : p)}>{p}</Chip>)}</Grid>
-                        </div>
-                      )}
+                      {rpoTags.length > 0 && (<div style={{ marginTop: 10 }}><div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's running the RPO?</div><Grid>{POSITIONS.map((p) => <Chip key={p} active={rpoPlayer === p} onClick={() => setRpoPlayer(rpoPlayer === p ? "" : p)}>{p}</Chip>)}</Grid></div>)}
                     </Section>
                   ) : null,
-                  passPlay: (
-                    <Section label="Pass Play"><Grid>{ORD_PASS_PLAYS.map((p) => <Chip key={p} active={play === p && playType === "Pass"} onClick={() => { setPlay(p); setPlayType("Pass"); }}>{p}</Chip>)}</Grid></Section>
-                  ),
+                  passPlay: (<Section label="Pass Play"><Grid>{ORD_PASS_PLAYS.map((p) => <Chip key={p} active={play === p && playType === "Pass"} onClick={() => { setPlay(p); setPlayType("Pass"); }}>{p}</Chip>)}</Grid></Section>),
                   result: (
                     <>
                       <Section label="Result">
@@ -1153,15 +1355,12 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                         {gainType === "INT" ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INTERCEPTION — 0 yards</div>
                           : gainType === "Safety" ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>SAFETY — 0 yards</div>
                           : incomplete ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INCOMPLETE — 0 yards</div>
-                          : (
-                          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                          : (<div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                             <button onClick={() => setYards(String((parseInt(yards, 10) || 0) - 1))} style={stepBtn}>–</button>
-                            <input value={yards} onChange={(e) => setYards(e.target.value.replace(/[^-0-9]/g, ""))} placeholder="0" inputMode="numeric"
-                              style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, width: 90, textAlign: "center", background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, color: "#f5c518", padding: "6px 0" }} />
+                            <input value={yards} onChange={(e) => setYards(e.target.value.replace(/[^-0-9]/g, ""))} placeholder="0" inputMode="numeric" style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, width: 90, textAlign: "center", background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, color: "#f5c518", padding: "6px 0" }} />
                             <button onClick={() => setYards(String((parseInt(yards, 10) || 0) + 1))} style={stepBtn}>+</button>
                             <span style={{ color: "#7a8699", fontSize: 13 }}>{gainType === "Sack" ? "yards lost" : "yards gained"}</span>
-                          </div>
-                        )}
+                          </div>)}
                       </Section>
                       {playType === "Pass" && gainType !== "Sack" && (
                         <Section label="Passer #">
@@ -1227,101 +1426,280 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                 if (!content) return null;
                 return <React.Fragment key={key}>{content}</React.Fragment>;
               })}
-              <button onClick={logPlay} disabled={!ready} style={{
+              <button onClick={logPlay} disabled={!offReady} style={{
                 width: "100%", marginTop: 8, padding: "18px", borderRadius: 12, border: "none",
-                background: ready ? "#f5c518" : "#1d2530", color: ready ? "#0a0e14" : "#4a5568",
-                fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", cursor: ready ? "pointer" : "not-allowed",
+                background: offReady ? "#f5c518" : "#1d2530", color: offReady ? "#0a0e14" : "#4a5568",
+                fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", cursor: offReady ? "pointer" : "not-allowed",
               }}>Log Play ↵</button>
             </>
           )}
+
+          {editing && side === "defense" && (
+            <>
+              {defSectionOrder.map((key) => {
+                const defSectionMap = {
+                  hash: (<Section label="Hash"><div style={{ display: "flex", gap: 8 }}>{HASHES.map((h) => <Chip key={h} active={hash === h} onClick={() => setHash(h)} big>{h}</Chip>)}</div></Section>),
+                  fieldBdry: defSec.fieldBdry ? (
+                    <Section label="Field / Boundary">
+                      <div style={{ display: "flex", gap: 8 }}>{ORD_FIELD_BDRY.map((fb) => <Chip key={fb} active={defFieldBdry === fb} onClick={() => setDefFieldBdry(defFieldBdry === fb ? "" : fb)} big>{fb}</Chip>)}</div>
+                    </Section>
+                  ) : null,
+                  downDistance: (
+                    <Section label="Down & Distance">
+                      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>{[1, 2, 3, 4].map((d) => <Chip key={d} active={down === d} onClick={() => setDown(d)} big>{ordinal(d)}</Chip>)}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        <span style={{ color: "#7a8699", fontSize: 14, textTransform: "uppercase", letterSpacing: 1 }}>&amp;</span>
+                        <button onClick={() => setDistance(Math.max(distance - 1, 1))} style={stepBtn}>–</button>
+                        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{distance}</span>
+                        <button onClick={() => setDistance(distance + 1)} style={stepBtn}>+</button>
+                        <span style={{ color: "#7a8699", fontSize: 13 }}>yds to go</span>
+                      </div>
+                    </Section>
+                  ),
+                  oppPersonnel: defSec.oppPersonnel ? (<Section label="Their Personnel"><Grid>{ORD_OPP_PERSONNEL.map((p) => <Chip key={p} active={defOppPersonnel === p} onClick={() => setDefOppPersonnel(defOppPersonnel === p ? "" : p)}>{p}</Chip>)}</Grid></Section>) : null,
+                  oppFormation: (<Section label="Their Formation"><Grid>{ORD_OPP_FORMATIONS.map((f) => <Chip key={f} active={defOppFormation === f} onClick={() => setDefOppFormation(f)}>{f}</Chip>)}</Grid></Section>),
+                  oppFormTags: defSec.oppFormTags ? (<Section label="Their Formation Tags · tap multiple"><Grid>{ORD_OPP_FORM_TAGS.map((t) => <Chip key={t} active={defOppFormTags.includes(t)} onClick={() => toggle(defOppFormTags, setDefOppFormTags, t)}>{t}</Chip>)}</Grid></Section>) : null,
+                  oppMotion: defSec.oppMotion ? (
+                    <Section label="Their Motion / Shift">
+                      <Grid>{ORD_OPP_MOTIONS.map((m) => <Chip key={m} active={defOppMotion === m} onClick={() => { setDefOppMotion(m); if (m === "None") setDefOppMotionPlayer(""); }}>{m}</Chip>)}</Grid>
+                      {defOppMotion !== "None" && (<div style={{ marginTop: 10 }}><div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's in motion?</div><Grid>{POSITIONS.map((p) => <Chip key={p} active={defOppMotionPlayer === p} onClick={() => setDefOppMotionPlayer(defOppMotionPlayer === p ? "" : p)}>{p}</Chip>)}</Grid></div>)}
+                    </Section>
+                  ) : null,
+                  oppRunPlay: (<Section label="Their Run Play"><Grid>{ORD_OPP_RUN_PLAYS.map((p) => <Chip key={p} active={defPlay === p && defPlayType === "Run"} onClick={() => { setDefPlay(p); setDefPlayType("Run"); }}>{p}</Chip>)}</Grid></Section>),
+                  oppPassPlay: (<Section label="Their Pass Play"><Grid>{ORD_OPP_PASS_PLAYS.map((p) => <Chip key={p} active={defPlay === p && defPlayType === "Pass"} onClick={() => { setDefPlay(p); setDefPlayType("Pass"); }}>{p}</Chip>)}</Grid></Section>),
+                  result: (
+                    <Section label="Result">
+                      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                        <Chip active={defGainType === "Run"} onClick={() => { setDefGainType("Run"); setDefIncomplete(false); }} big>Run</Chip>
+                        <Chip active={defGainType === "Pass" && !defIncomplete} onClick={() => { setDefGainType("Pass"); setDefIncomplete(false); }} big>Pass</Chip>
+                        <Chip active={defIncomplete && defGainType === "Pass"} onClick={() => { setDefGainType("Pass"); setDefIncomplete(true); setDefYards(""); setDefCarrier(""); }} big>Inc</Chip>
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                        <Chip active={defGainType === "TD"} onClick={() => { setDefGainType("TD"); setDefIncomplete(false); }} big>TD</Chip>
+                        <Chip active={defGainType === "INT"} onClick={() => { setDefGainType("INT"); setDefIncomplete(true); setDefYards(""); setDefCarrier(""); }} big>INT</Chip>
+                        <Chip active={defGainType === "Fumble"} onClick={() => { setDefGainType("Fumble"); setDefIncomplete(false); }} big>Fumble</Chip>
+                        <Chip active={defGainType === "Safety"} onClick={() => { setDefGainType("Safety"); setDefIncomplete(true); setDefYards(""); setDefCarrier(""); }} big>Safety</Chip>
+                        <Chip active={defGainType === "Sack"} onClick={() => { setDefGainType("Sack"); setDefIncomplete(false); }} big>Sack</Chip>
+                      </div>
+                      {defGainType === "INT" ? <div style={{ color: "#3ddc84", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INTERCEPTION — turnover!</div>
+                        : defGainType === "Safety" ? <div style={{ color: "#3ddc84", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>SAFETY — 2 points!</div>
+                        : defIncomplete ? <div style={{ color: "#3ddc84", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INCOMPLETE — no gain</div>
+                        : (<div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                          <button onClick={() => setDefYards(String((parseInt(defYards, 10) || 0) - 1))} style={stepBtn}>–</button>
+                          <input value={defYards} onChange={(e) => setDefYards(e.target.value.replace(/[^-0-9]/g, ""))} placeholder="0" inputMode="numeric" style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, width: 90, textAlign: "center", background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, color: "#f5c518", padding: "6px 0" }} />
+                          <button onClick={() => setDefYards(String((parseInt(defYards, 10) || 0) + 1))} style={stepBtn}>+</button>
+                          <span style={{ color: "#7a8699", fontSize: 13 }}>{defGainType === "Sack" ? "yards lost" : "yards allowed"}</span>
+                        </div>)}
+                    </Section>
+                  ),
+                  defFront: defSec.defFront ? (<Section label="Our Front"><Grid>{ORD_DEF_FRONTS.map((f) => <Chip key={f} active={defFront === f} onClick={() => setDefFront(defFront === f ? "" : f)}>{f}</Chip>)}</Grid></Section>) : null,
+                  defCoverage: defSec.defCoverage ? (<Section label="Our Coverage"><Grid>{ORD_DEF_COVERAGES.map((c) => <Chip key={c} active={defCoverage === c} onClick={() => setDefCoverage(defCoverage === c ? "" : c)}>{c}</Chip>)}</Grid></Section>) : null,
+                  defBlitz: defSec.defBlitz ? (<Section label="Blitz Tag"><Grid>{ORD_DEF_BLITZ.map((b) => <Chip key={b} active={defBlitz === b} onClick={() => setDefBlitz(defBlitz === b ? "" : b)}>{b}</Chip>)}</Grid></Section>) : null,
+                  carrier: defSec.carrier && !defIncomplete ? (
+                    <Section label="Their Ball Carrier #">
+                      {defUsedCarriers.length > 0 && <Grid>{defUsedCarriers.map((n) => <Chip key={n} active={defCarrier === n} onClick={() => setDefCarrier(defCarrier === n ? "" : n)}>#{n}</Chip>)}</Grid>}
+                      <input value={defCarrier} onChange={(e) => setDefCarrier(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: defUsedCarriers.length ? 10 : 0 }} />
+                    </Section>
+                  ) : null,
+                  tackler: defSec.tackler ? (
+                    <Section label="Our Tackler">
+                      <Grid>{DEF_POS.map((pos) => <Chip key={pos} active={defTacklerPos === pos} onClick={() => setDefTacklerPos(defTacklerPos === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
+                      {defUsedTacklers.length > 0 && <div style={{ marginTop: 10 }}><Grid>{defUsedTacklers.map((n) => <Chip key={n} active={defTacklerNum === n} onClick={() => { const sel = defTacklerNum === n; setDefTacklerNum(sel ? "" : n); if (!sel && ourDefPosMap[n]) setDefTacklerPos(ourDefPosMap[n]); }}>{ourDefLabel(n)}</Chip>)}</Grid></div>}
+                      <input value={defTacklerNum} onChange={(e) => setDefTacklerNum(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: 10 }} />
+                      {defTopTacklers.length > 0 && (
+                        <div style={{ marginTop: 14, background: "#11161f", borderRadius: 10, padding: "12px 14px", border: "1px solid #1d2530" }}>
+                          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Top Tacklers · Our Defense</div>
+                          {defTopTacklers.map(([num, ct], i) => (
+                            <div key={num} style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0" }}>
+                              <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, color: ["#f5c518", "#c4cdda", "#cd7f32"][i], fontSize: 16, minWidth: 18 }}>{i + 1}</span>
+                              <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 16 }}>{ourDefLabel(num)}</span>
+                              <span style={{ marginLeft: "auto", color: "#a8b3c4", fontSize: 14 }}>{ct} {ct === 1 ? "tackle" : "tackles"}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </Section>
+                  ) : null,
+                };
+                const content = defSectionMap[key];
+                if (!content) return null;
+                return <React.Fragment key={key}>{content}</React.Fragment>;
+              })}
+              <button onClick={logDefPlay} disabled={!defReady} style={{
+                width: "100%", marginTop: 8, padding: "18px", borderRadius: 12, border: "none",
+                background: defReady ? "#3ddc84" : "#1d2530", color: defReady ? "#0a0e14" : "#4a5568",
+                fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", cursor: defReady ? "pointer" : "not-allowed",
+              }}>Log Play ↵</button>
+            </>
+          )}
+
           {!editing && (
             <div style={{ background: "#141a24", borderRadius: 10, padding: "12px 14px", marginBottom: 16, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
               View mode — watching the live game. Switch to Edit to chart plays.
             </div>
           )}
-          {plays.length > 0 && (
+          {activePlays.length > 0 && (
             <div style={{ marginTop: editing ? 24 : 0 }}>
-              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 10 }}>Play Log · {plays.length}</div>
-              {plays.map((p) => (
-                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${p.gainType === "TD" ? "#3ddc84" : (p.incomplete || p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Sack") ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518"}` }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>{ordinal(p.down)} &amp; {p.distance} · {p.hash} · {p.personnel} {p.formation}{p.formTags.length ? ` ${p.formTags.join(" ")}` : ""}</div>
-                    <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{(p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play}{p.rpoTags?.length ? ` · ${p.rpoTags.join("/")}${p.rpoPlayer ? " (" + p.rpoPlayer + ")" : ""}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.passer ? ` · QB #${p.passer}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{p.gainType === "Fumble" ? ` · frc ${p.fumbleForcer || "—"}${p.fumbleRecovery ? " · " + p.fumbleRecovery.toLowerCase() + " rec" : ""}` : ""}{p.gainType === "INT" ? ` · int ${p.intBy || "—"}${p.intReturn ? " · " + p.intReturn + " yd ret" : ""}` : ""}{p.gainType !== "INT" && p.gainType !== "Fumble" ? ` · tkl ${p.tackler}` : ""}</div>
-                  </div>
-                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, minWidth: 44, textAlign: "right", color: p.gainType === "TD" ? "#3ddc84" : (p.incomplete || p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Sack") ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518" }}>
-                    {p.gainType === "INT" ? "INT" : p.gainType === "Safety" ? "SAF" : p.gainType === "TD" ? "TD" : p.gainType === "Sack" ? "SCK" : p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}
-                  </div>
-                  {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
-                </div>
-              ))}
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 10 }}>
+                {side === "offense" ? "Offense" : "Defense"} · {activePlays.length} {activePlays.length === 1 ? "play" : "plays"}
+              </div>
+              {activePlays.map((p) => {
+                if (side === "offense") {
+                  const col = p.gainType === "TD" ? "#3ddc84" : (p.incomplete || p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Sack") ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518";
+                  return (
+                    <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${col}` }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>{ordinal(p.down)} &amp; {p.distance} · {p.hash} · {p.personnel} {p.formation}{p.formTags?.length ? ` ${p.formTags.join(" ")}` : ""}</div>
+                        <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{(p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play}{p.rpoTags?.length ? ` · ${p.rpoTags.join("/")}${p.rpoPlayer ? " (" + p.rpoPlayer + ")" : ""}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.passer ? ` · QB #${p.passer}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{p.gainType === "Fumble" ? ` · frc ${p.fumbleForcer || "—"}${p.fumbleRecovery ? " · " + p.fumbleRecovery.toLowerCase() + " rec" : ""}` : ""}{p.gainType === "INT" ? ` · int ${p.intBy || "—"}${p.intReturn ? " · " + p.intReturn + " yd ret" : ""}` : ""}{p.gainType !== "INT" && p.gainType !== "Fumble" ? ` · tkl ${p.tackler}` : ""}</div>
+                      </div>
+                      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, minWidth: 44, textAlign: "right", color: col }}>
+                        {p.gainType === "INT" ? "INT" : p.gainType === "Safety" ? "SAF" : p.gainType === "TD" ? "TD" : p.gainType === "Sack" ? "SCK" : p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}
+                      </div>
+                      {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
+                    </div>
+                  );
+                } else {
+                  const col = p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Fumble" ? "#3ddc84"
+                    : p.gainType === "TD" ? "#ff5252"
+                    : p.incomplete ? "#3ddc84"
+                    : p.yards >= p.distance ? "#ff5252" : p.yards < 0 ? "#3ddc84" : "#f5c518";
+                  return (
+                    <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${col}` }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>
+                          {ordinal(p.down)} &amp; {p.distance} · {p.hash}{p.fieldBdry ? ` · ${p.fieldBdry}` : ""} · {p.oppPersonnel} {p.oppFormation}{p.oppFormTags?.length ? ` ${p.oppFormTags.join(" ")}` : ""}
+                        </div>
+                        <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>
+                          {p.play}{p.oppMotion !== "None" ? ` · ${p.oppMotionPlayer ? p.oppMotionPlayer + " " : ""}${p.oppMotion}` : ""}{p.front ? ` · ${p.front}` : ""}{p.coverage ? `/${p.coverage}` : ""}{p.blitz && p.blitz !== "None" ? `/${p.blitz}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{` · tkl ${p.tackler}`}
+                        </div>
+                      </div>
+                      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, minWidth: 44, textAlign: "right", color: col }}>
+                        {p.gainType === "INT" ? "INT" : p.gainType === "Safety" ? "SAF" : p.gainType === "TD" ? "TD" : p.gainType === "Sack" ? "SCK" : p.gainType === "Fumble" ? "FUM" : p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}
+                      </div>
+                      {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
+                    </div>
+                  );
+                }
+              })}
             </div>
           )}
-          {loaded && plays.length === 0 && !editing && <div style={{ color: "#4a5568", textAlign: "center", padding: 30, fontSize: 15 }}>No plays logged yet.</div>}
+          {loaded && activePlays.length === 0 && !editing && <div style={{ color: "#4a5568", textAlign: "center", padding: 30, fontSize: 15 }}>No plays logged yet.</div>}
         </div>
       )}
 
       {tab === "tendencies" && (
         <div style={{ padding: 16 }}>
-          {plays.length === 0 ? <div style={{ textAlign: "center", color: "#4a5568", padding: "60px 20px", fontSize: 15 }}>No plays logged yet.</div> : (() => {
-            const rushPlays = plays.filter(p => p.playType === "Run" || p.gainType === "Sack");
-            const rushYards = rushPlays.reduce((s, p) => s + p.yards, 0);
-            const rushTDs = plays.filter(p => p.gainType === "TD" && p.playType === "Run").length;
-            const passPlays = plays.filter(p => p.playType === "Pass" && p.gainType !== "Sack");
-            const passComp = passPlays.filter(p => !p.incomplete && p.gainType !== "INT").length;
-            const passYards = passPlays.filter(p => !p.incomplete && p.gainType !== "INT").reduce((s, p) => s + p.yards, 0);
-            const passTDs = plays.filter(p => p.gainType === "TD" && p.playType === "Pass").length;
-            const ints = plays.filter(p => p.gainType === "INT").length;
-            const fumbles = plays.filter(p => p.gainType === "Fumble").length;
-            const sacks = plays.filter(p => p.gainType === "Sack").length;
-            const safeties = plays.filter(p => p.gainType === "Safety").length;
-            const qbStats = {};
-            plays.filter(p => p.playType === "Pass" && p.passer && p.gainType !== "Sack").forEach(p => {
-              const q = qbStats[p.passer] ??= { att: 0, comp: 0, yards: 0, tds: 0, ints: 0 };
-              q.att++;
-              if (!p.incomplete && p.gainType !== "INT") { q.comp++; q.yards += p.yards; }
-              if (p.gainType === "TD") q.tds++;
-              if (p.gainType === "INT") q.ints++;
-            });
-            const bsRow = (label, value) => (
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #1d2530" }}>
-                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 1, textTransform: "uppercase", color: "#7a8699" }}>{label}</span>
-                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, color: "#f4f4f0" }}>{value}</span>
-              </div>
-            );
-            return (
-              <>
-                <div style={{ background: "#11161f", border: "1px solid #1d2530", borderRadius: 12, padding: "14px 16px", marginBottom: 20 }}>
-                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#f5c518", marginBottom: 10 }}>Box Score</div>
-                  {bsRow("Total", `${plays.length} plays · ${rushYards + passYards >= 0 ? "+" : ""}${rushYards + passYards} yds`)}
-                  {bsRow("Rush", `${rushPlays.length} att · ${rushYards >= 0 ? "+" : ""}${rushYards} yds${rushTDs ? ` · ${rushTDs} TD` : ""}${sacks ? ` · ${sacks} sack${sacks > 1 ? "s" : ""}` : ""}`)}
-                  {bsRow("Pass", `${passComp}/${passPlays.length} · ${passYards >= 0 ? "+" : ""}${passYards} yds${passTDs ? ` · ${passTDs} TD` : ""}${ints ? ` · ${ints} INT` : ""}`)}
-                  {Object.entries(qbStats).map(([num, s]) => bsRow(`QB #${num}`, `${s.comp}/${s.att} · ${s.yards >= 0 ? "+" : ""}${s.yards} yds${s.tds ? " · " + s.tds + " TD" : ""}${s.ints ? " · " + s.ints + " INT" : ""}`))}
-                  {(fumbles > 0 || safeties > 0) && bsRow("Turnovers", `${fumbles ? fumbles + " fumble" + (fumbles > 1 ? "s" : "") : ""}${fumbles && safeties ? " · " : ""}${safeties ? safeties + " safety" : ""}`)}
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <button onClick={() => setTendSide("offense")} style={modeBtn(tendSide === "offense", true)}>Offense</button>
+            <button onClick={() => setTendSide("defense")} style={modeBtn(tendSide === "defense")}>Defense</button>
+          </div>
+          {tendSide === "offense" ? (
+            offPlays.length === 0 ? <div style={{ textAlign: "center", color: "#4a5568", padding: "60px 20px", fontSize: 15 }}>No offensive plays logged yet.</div> : (() => {
+              const rushPlays = offPlays.filter(p => p.playType === "Run" || p.gainType === "Sack");
+              const rushYards = rushPlays.reduce((s, p) => s + p.yards, 0);
+              const rushTDs = offPlays.filter(p => p.gainType === "TD" && p.playType === "Run").length;
+              const passPlays = offPlays.filter(p => p.playType === "Pass" && p.gainType !== "Sack");
+              const passComp = passPlays.filter(p => !p.incomplete && p.gainType !== "INT").length;
+              const passYards = passPlays.filter(p => !p.incomplete && p.gainType !== "INT").reduce((s, p) => s + p.yards, 0);
+              const passTDs = offPlays.filter(p => p.gainType === "TD" && p.playType === "Pass").length;
+              const ints = offPlays.filter(p => p.gainType === "INT").length;
+              const fumbles = offPlays.filter(p => p.gainType === "Fumble").length;
+              const sacks = offPlays.filter(p => p.gainType === "Sack").length;
+              const safeties = offPlays.filter(p => p.gainType === "Safety").length;
+              const qbStats = {};
+              offPlays.filter(p => p.playType === "Pass" && p.passer && p.gainType !== "Sack").forEach(p => {
+                const q = qbStats[p.passer] ??= { att: 0, comp: 0, yards: 0, tds: 0, ints: 0 };
+                q.att++; if (!p.incomplete && p.gainType !== "INT") { q.comp++; q.yards += p.yards; }
+                if (p.gainType === "TD") q.tds++; if (p.gainType === "INT") q.ints++;
+              });
+              const bsRow = (lbl, value) => (
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #1d2530" }}>
+                  <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 1, textTransform: "uppercase", color: "#7a8699" }}>{lbl}</span>
+                  <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, color: "#f4f4f0" }}>{value}</span>
                 </div>
-                <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
-                  <Stat label="Plays" value={plays.length} /><Stat label="Total Yds" value={tendencies.totalYards} /><Stat label="Yds / Play" value={tendencies.avg} accent />
+              );
+              return (
+                <>
+                  <div style={{ background: "#11161f", border: "1px solid #1d2530", borderRadius: 12, padding: "14px 16px", marginBottom: 20 }}>
+                    <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#f5c518", marginBottom: 10 }}>Offense · Box Score</div>
+                    {bsRow("Total", `${offPlays.length} plays · ${rushYards + passYards >= 0 ? "+" : ""}${rushYards + passYards} yds`)}
+                    {bsRow("Rush", `${rushPlays.length} att · ${rushYards >= 0 ? "+" : ""}${rushYards} yds${rushTDs ? ` · ${rushTDs} TD` : ""}${sacks ? ` · ${sacks} sack${sacks > 1 ? "s" : ""}` : ""}`)}
+                    {bsRow("Pass", `${passComp}/${passPlays.length} · ${passYards >= 0 ? "+" : ""}${passYards} yds${passTDs ? ` · ${passTDs} TD` : ""}${ints ? ` · ${ints} INT` : ""}`)}
+                    {Object.entries(qbStats).map(([num, s]) => bsRow(`QB #${num}`, `${s.comp}/${s.att} · ${s.yards >= 0 ? "+" : ""}${s.yards} yds${s.tds ? " · " + s.tds + " TD" : ""}${s.ints ? " · " + s.ints + " INT" : ""}`))}
+                    {(fumbles > 0 || safeties > 0) && bsRow("Turnovers", `${fumbles ? fumbles + " fumble" + (fumbles > 1 ? "s" : "") : ""}${fumbles && safeties ? " · " : ""}${safeties ? safeties + " safety" : ""}`)}
+                  </div>
+                  <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+                    <Stat label="Plays" value={offPlays.length} /><Stat label="Total Yds" value={tendencies.totalYards} /><Stat label="Yds / Play" value={tendencies.avg} accent />
+                  </div>
+                  <Breakdown title="Run vs Pass" data={tendencies.byGain} total={offPlays.length} />
+                  <Breakdown title="By Personnel" data={tendencies.byPersonnel} total={offPlays.length} />
+                  <Breakdown title="By Formation" data={tendencies.byFormation} total={offPlays.length} />
+                  <Breakdown title="By Play Call" data={tendencies.byPlay} total={offPlays.length} />
+                  <Breakdown title="By Hash" data={tendencies.byHash} total={offPlays.length} />
+                  <Breakdown title="By Down" data={tendencies.byDown} total={offPlays.length} keyFmt={ordinal} />
+                  <CarrierBreakdown data={tendencies.byCarrier} />
+                </>
+              );
+            })()
+          ) : (
+            defPlays.length === 0 ? <div style={{ textAlign: "center", color: "#4a5568", padding: "60px 20px", fontSize: 15 }}>No defensive plays logged yet.</div> : (() => {
+              const dt = defTendencies;
+              const runPlays = defPlays.filter(p => p.playType === "Run" || p.gainType === "Sack");
+              const runYards = runPlays.reduce((s, p) => s + p.yards, 0);
+              const runTDs = defPlays.filter(p => p.gainType === "TD" && p.playType === "Run").length;
+              const passPl = defPlays.filter(p => p.playType === "Pass" && p.gainType !== "Sack");
+              const passComp = passPl.filter(p => !p.incomplete && p.gainType !== "INT").length;
+              const passYards = passPl.filter(p => !p.incomplete && p.gainType !== "INT").reduce((s, p) => s + p.yards, 0);
+              const passTDs = defPlays.filter(p => p.gainType === "TD" && p.playType === "Pass").length;
+              const turnovers = defPlays.filter(p => p.gainType === "INT" || p.gainType === "Fumble").length;
+              const safeties = defPlays.filter(p => p.gainType === "Safety").length;
+              const sacks = defPlays.filter(p => p.gainType === "Sack").length;
+              const bsRow = (lbl, value) => (
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #1d2530" }}>
+                  <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 1, textTransform: "uppercase", color: "#7a8699" }}>{lbl}</span>
+                  <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, color: "#f4f4f0" }}>{value}</span>
                 </div>
-              <Breakdown title="Run vs Pass" data={tendencies.byGain} total={plays.length} />
-              <Breakdown title="By Personnel" data={tendencies.byPersonnel} total={plays.length} />
-              <Breakdown title="By Formation" data={tendencies.byFormation} total={plays.length} />
-              <Breakdown title="By Play Call" data={tendencies.byPlay} total={plays.length} />
-              <Breakdown title="By Hash" data={tendencies.byHash} total={plays.length} />
-              <Breakdown title="By Down" data={tendencies.byDown} total={plays.length} keyFmt={ordinal} />
-              <CarrierBreakdown data={tendencies.byCarrier} />
-            </>
-          );
-          })()}
+              );
+              return (
+                <>
+                  <div style={{ background: "#11161f", border: "1px solid #1d2530", borderRadius: 12, padding: "14px 16px", marginBottom: 20 }}>
+                    <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#3ddc84", marginBottom: 10 }}>Defense · Box Score</div>
+                    {bsRow("Total Plays", `${defPlays.length} · ${dt.totalYards} yds allowed · ${dt.avg} avg`)}
+                    {bsRow("Rush Def", `${runPlays.length} att · ${runYards} yds${runTDs ? ` · ${runTDs} TD allowed` : ""}`)}
+                    {bsRow("Pass Def", `${passComp}/${passPl.length} · ${passYards} yds${passTDs ? ` · ${passTDs} TD allowed` : ""}`)}
+                    {(turnovers > 0 || safeties > 0 || sacks > 0) && bsRow("Takeaways / Big Plays", [turnovers ? `${turnovers} TO` : "", safeties ? `${safeties} safety` : "", sacks ? `${sacks} sack${sacks > 1 ? "s" : ""}` : ""].filter(Boolean).join(" · "))}
+                  </div>
+                  <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+                    <Stat label="Plays" value={defPlays.length} /><Stat label="Yds Allowed" value={dt.totalYards} /><Stat label="Yds / Play" value={dt.avg} accent />
+                  </div>
+                  <Breakdown title="Run vs Pass" data={dt.byGain} total={defPlays.length} />
+                  <Breakdown title="By Their Personnel" data={dt.byPersonnel} total={defPlays.length} />
+                  <Breakdown title="By Their Formation" data={dt.byFormation} total={defPlays.length} />
+                  <Breakdown title="By Their Play" data={dt.byPlay} total={defPlays.length} />
+                  <Breakdown title="By Hash" data={dt.byHash} total={defPlays.length} />
+                  <Breakdown title="By Down" data={dt.byDown} total={defPlays.length} keyFmt={ordinal} />
+                  <Breakdown title="By Our Front" data={dt.byFront} total={defPlays.length} />
+                  <Breakdown title="By Our Coverage" data={dt.byCoverage} total={defPlays.length} />
+                  {Object.keys(dt.byBlitz).some(k => k !== "None" && k !== "—") && <Breakdown title="By Blitz Tag" data={Object.fromEntries(Object.entries(dt.byBlitz).filter(([k]) => k !== "None" && k !== "—"))} total={defPlays.length} />}
+                  <CarrierBreakdown data={dt.byCarrier} />
+                </>
+              );
+            })()
+          )}
         </div>
       )}
 
       {tab === "export" && (
         <div style={{ padding: 16 }}>
           <div style={{ background: "#11161f", borderRadius: 12, padding: 16, marginBottom: 16, border: "1px solid #1d2530" }}>
-            <div style={{ fontSize: 14, color: "#a8b3c4", lineHeight: 1.5 }}>{plays.length} plays in <b style={{ color: "#f4f4f0" }}>{label}</b>. Downloads as a CSV you can open in Excel or Sheets.</div>
+            <div style={{ fontSize: 14, color: "#a8b3c4", lineHeight: 1.5 }}>{offPlays.length} offensive + {defPlays.length} defensive plays in <b style={{ color: "#f4f4f0" }}>{label}</b>. Downloads as a CSV you can open in Excel or Sheets.</div>
           </div>
-          <button onClick={exportCSV} disabled={plays.length === 0} style={{
-            width: "100%", padding: "18px", borderRadius: 12, border: "none", background: plays.length ? "#3ddc84" : "#1d2530", color: plays.length ? "#0a0e14" : "#4a5568",
-            fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", cursor: plays.length ? "pointer" : "not-allowed",
+          <button onClick={exportCSV} disabled={offPlays.length === 0 && defPlays.length === 0} style={{
+            width: "100%", padding: "18px", borderRadius: 12, border: "none",
+            background: (offPlays.length || defPlays.length) ? "#3ddc84" : "#1d2530",
+            color: (offPlays.length || defPlays.length) ? "#0a0e14" : "#4a5568",
+            fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase",
+            cursor: (offPlays.length || defPlays.length) ? "pointer" : "not-allowed",
           }}>↓ Download Spreadsheet (CSV)</button>
         </div>
       )}

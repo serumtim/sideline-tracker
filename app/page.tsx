@@ -2,6 +2,9 @@
 // @ts-nocheck
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { supabase } from "../lib/supabase";
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import { SortableContext, verticalListSortingStrategy, rectSortingStrategy, useSortable, arrayMove } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 const HASHES = ["L", "M", "R"];
 const DEF_POS = ["DL", "LB", "CB", "S", "DB", "EDGE"];
@@ -23,6 +26,16 @@ const DEFAULT_PLAYBOOK = {
     carrier: true,
     tackler: true,
   },
+};
+
+const DEFAULT_SECTION_ORDER = ["hash", "downDistance", "personnel", "formation", "formTags", "motion", "runPlay", "rpoTags", "passPlay", "result", "carrier", "tackler"];
+const DEFAULT_LAYOUT = { sectionOrder: [...DEFAULT_SECTION_ORDER], chipOrder: {} };
+
+const SECTION_LABELS = {
+  hash: "Hash", downDistance: "Down & Distance", personnel: "Personnel",
+  formation: "Formation", formTags: "Formation Tags", motion: "Shift / Motion",
+  runPlay: "Run Play", rpoTags: "RPO Tags", passPlay: "Pass Play",
+  result: "Result", carrier: "Ball Carrier", tackler: "Tackled By",
 };
 
 const US_STATES = [
@@ -63,6 +76,7 @@ export default function PlayTracker() {
   const [activeId, setActiveId] = useState(null);
   const [loadingIndex, setLoadingIndex] = useState(true);
   const [playbook, setPlaybook] = useState(DEFAULT_PLAYBOOK);
+  const [layout, setLayout] = useState(DEFAULT_LAYOUT);
 
   const isHeadCoach = profile?.role !== "assistant";
   const canEditPlaybook = isHeadCoach || profile?.can_edit_playbook === true;
@@ -85,6 +99,24 @@ export default function PlayTracker() {
     if (data?.data) setPlaybook({ ...DEFAULT_PLAYBOOK, ...data.data });
   }
 
+  async function fetchLayout(prof, uid) {
+    const targetId = prof?.role === "assistant" && prof?.team_id ? prof.team_id : uid;
+    if (!targetId) return;
+    try {
+      const { data } = await supabase.from("team_layout").select("layout").eq("user_id", targetId).maybeSingle();
+      if (data?.layout) setLayout({ ...DEFAULT_LAYOUT, ...data.layout });
+    } catch { /* table may not exist yet */ }
+  }
+
+  async function saveLayout(data) {
+    if (!canEditPlaybook) return;
+    const targetId = profile.role === "assistant" ? profile.team_id : user.id;
+    try {
+      await supabase.from("team_layout").upsert({ user_id: targetId, layout: data, updated_at: new Date().toISOString() });
+      setLayout(data);
+    } catch (e) { console.error("saveLayout failed:", e?.message); }
+  }
+
   async function initUser(u) {
     setUser(u);
     setProfile(undefined);
@@ -92,6 +124,7 @@ export default function PlayTracker() {
     setProfile(prof);
     loadIndex();
     fetchPlaybook(prof, u.id);
+    fetchLayout(prof, u.id);
   }
 
   // Called by AuthScreen after a successful sign-up (profile already created)
@@ -101,6 +134,7 @@ export default function PlayTracker() {
     setAuthLoading(false);
     loadIndex();
     fetchPlaybook(prof, u.id);
+    fetchLayout(prof, u.id);
   }
 
   useEffect(() => {
@@ -114,13 +148,24 @@ export default function PlayTracker() {
       if (event === "SIGNED_IN" && session?.user) {
         await initUser(session.user);
       } else if (event === "SIGNED_OUT") {
-        setUser(null); setProfile(null); setPlaybook(DEFAULT_PLAYBOOK);
+        setUser(null); setProfile(null); setPlaybook(DEFAULT_PLAYBOOK); setLayout(DEFAULT_LAYOUT);
         setGamesIndex([]); setScreen("games"); setActiveId(null); setLoadingIndex(true);
       }
     });
 
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!user?.id || !profile) return;
+    const targetId = profile?.role === "assistant" && profile?.team_id ? profile.team_id : user.id;
+    const channel = supabase
+      .channel(`layout-${targetId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "team_layout", filter: `user_id=eq.${targetId}` },
+        (payload) => { if (payload.new?.layout) setLayout({ ...DEFAULT_LAYOUT, ...payload.new.layout }); })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [user?.id, profile?.role, profile?.team_id]);
 
   async function createGame(label) {
     if (!isHeadCoach) return;
@@ -155,7 +200,7 @@ export default function PlayTracker() {
   if (!user) return <AuthScreen onSignedUp={handleSignedUp} />;
   if (!profile) return (
     <SetupScreen userId={user.id} userEmail={user.email || ""} onDone={(prof) => {
-      setProfile(prof); fetchPlaybook(prof, user.id);
+      setProfile(prof); fetchPlaybook(prof, user.id); fetchLayout(prof, user.id);
     }} />
   );
 
@@ -166,7 +211,7 @@ export default function PlayTracker() {
     <ReportsScreen index={gamesIndex} onBack={() => setScreen("games")} />
   );
   if (screen === "playbook" && canEditPlaybook) return (
-    <PlaybookEditor playbook={playbook} onSave={savePlaybook} onBack={() => setScreen("games")} />
+    <PlaybookEditor playbook={playbook} onSave={savePlaybook} layout={layout} onSaveLayout={saveLayout} onBack={() => setScreen("games")} />
   );
   if (screen === "games") return (
     <GamesList
@@ -185,7 +230,7 @@ export default function PlayTracker() {
 
   const active = gamesIndex.find((g) => g.id === activeId);
   return (
-    <Game id={activeId} label={active?.label || "Game"} playbook={playbook}
+    <Game id={activeId} label={active?.label || "Game"} playbook={playbook} layout={layout}
       isHeadCoach={isHeadCoach}
       onBack={() => { setScreen("games"); loadIndex(); }} />
   );
@@ -651,26 +696,39 @@ function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSi
   );
 }
 
+// =================== DRAG HANDLE COMPONENTS ===================
+function SortableRow({ id, children }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  return (
+    <div ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1, display: "flex", alignItems: "center", gap: 10, padding: "10px 4px", borderBottom: "1px solid #1d2530" }}>
+      <span {...attributes} {...listeners} style={{ color: "#4a5568", fontSize: 20, cursor: "grab", padding: "2px 8px", touchAction: "none", userSelect: "none", flexShrink: 0 }}>≡</span>
+      <div style={{ flex: 1 }}>{children}</div>
+    </div>
+  );
+}
+function SortableChipItem({ id, children }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  return (
+    <div ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1, display: "flex", alignItems: "center", background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, padding: "9px 10px", gap: 6 }}>
+      <span {...attributes} {...listeners} style={{ color: "#4a5568", fontSize: 16, cursor: "grab", touchAction: "none", userSelect: "none", flexShrink: 0 }}>≡</span>
+      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, color: "#c4cdda" }}>{children}</span>
+    </div>
+  );
+}
+
 // =================== PLAYBOOK EDITOR ===================
-function PlaybookEditor({ playbook, onSave, onBack }) {
+function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
   const [draft, setDraft] = useState({ ...playbook });
+  const [layoutDraft, setLayoutDraft] = useState({ ...DEFAULT_LAYOUT, ...layout });
+  const [editorTab, setEditorTab] = useState("arrange");
   const [saving, setSaving] = useState(false);
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   function removeItem(key, item) { setDraft((d) => ({ ...d, [key]: d[key].filter((x) => x !== item) })); }
   function addItem(key, value) { setDraft((d) => ({ ...d, [key]: [...d[key], value] })); }
 
-  async function handleSave() {
-    setSaving(true); await onSave(draft); setSaving(false); onBack();
-  }
-
-  const sectionToggles = [
-    { key: "personnel", label: "Personnel" },
-    { key: "formTags", label: "Formation Tags" },
-    { key: "motion", label: "Shift / Motion" },
-    { key: "rpo", label: "RPO Tags" },
-    { key: "carrier", label: "Ball Carrier" },
-    { key: "tackler", label: "Tackled By" },
-  ];
+  async function handleSave() { setSaving(true); await onSave(draft); setSaving(false); onBack(); }
 
   function toggleSection(key) {
     setDraft((d) => ({
@@ -679,47 +737,135 @@ function PlaybookEditor({ playbook, onSave, onBack }) {
     }));
   }
 
+  function getLayoutChips(sectionId, baseChips) {
+    const saved = layoutDraft.chipOrder?.[sectionId];
+    if (!saved?.length) return baseChips;
+    return [...saved.filter(c => baseChips.includes(c)), ...baseChips.filter(c => !saved.includes(c))];
+  }
+
+  function handleSectionDragEnd({ active, over }) {
+    if (!over || active.id === over.id) return;
+    const oldIdx = layoutDraft.sectionOrder.indexOf(active.id);
+    const newIdx = layoutDraft.sectionOrder.indexOf(over.id);
+    const next = { ...layoutDraft, sectionOrder: arrayMove(layoutDraft.sectionOrder, oldIdx, newIdx) };
+    setLayoutDraft(next); onSaveLayout(next);
+  }
+
+  function makeChipDragEnd(sectionId, baseChips) {
+    return ({ active, over }) => {
+      if (!over || active.id === over.id) return;
+      const cur = getLayoutChips(sectionId, baseChips);
+      const next = { ...layoutDraft, chipOrder: { ...layoutDraft.chipOrder, [sectionId]: arrayMove(cur, cur.indexOf(active.id), cur.indexOf(over.id)) } };
+      setLayoutDraft(next); onSaveLayout(next);
+    };
+  }
+
+  const sectionToggles = [
+    { key: "personnel", label: "Personnel" }, { key: "formTags", label: "Formation Tags" },
+    { key: "motion", label: "Shift / Motion" }, { key: "rpo", label: "RPO Tags" },
+    { key: "carrier", label: "Ball Carrier" }, { key: "tackler", label: "Tackled By" },
+  ];
   const categories = [
-    { key: "personnel", label: "Personnel Groups" },
-    { key: "formations", label: "Formations" },
-    { key: "formTags", label: "Formation Tags" },
-    { key: "runPlays", label: "Run Plays" },
-    { key: "passPlays", label: "Pass Plays" },
-    { key: "motions", label: "Motions (None is always available)" },
-    { key: "positions", label: "Positions" },
-    { key: "rpoTags", label: "RPO Tags" },
+    { key: "personnel", label: "Personnel Groups" }, { key: "formations", label: "Formations" },
+    { key: "formTags", label: "Formation Tags" }, { key: "runPlays", label: "Run Plays" },
+    { key: "passPlays", label: "Pass Plays" }, { key: "motions", label: "Motions (None is always available)" },
+    { key: "positions", label: "Positions" }, { key: "rpoTags", label: "RPO Tags" },
+  ];
+  const chipSections = [
+    { id: "personnel", label: "Personnel", chips: draft.personnel },
+    { id: "formation", label: "Formations", chips: draft.formations },
+    { id: "formTags", label: "Formation Tags", chips: draft.formTags },
+    { id: "motion", label: "Motions", chips: draft.motions },
+    { id: "runPlay", label: "Run Plays", chips: draft.runPlays },
+    { id: "rpoTags", label: "RPO Tags", chips: draft.rpoTags },
+    { id: "passPlay", label: "Pass Plays", chips: draft.passPlays },
   ];
 
   return (
     <Shell subtitle="Edit Playbook" onBack={onBack}>
-      <div style={{ padding: 16 }}>
-        <div style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 20, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
-          Tap × to remove an item. Type a name and press + or Enter to add one.
-        </div>
-        <Section label="Visible Sections · toggle off sections your team doesn't use">
-          {sectionToggles.map(({ key, label }) => {
-            const on = (draft.sections ?? DEFAULT_PLAYBOOK.sections)[key];
-            return (
-              <div key={key} onClick={() => toggleSection(key)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 4px", borderBottom: "1px solid #1d2530", cursor: "pointer" }}>
-                <span style={{ fontFamily: FONT_BODY, fontSize: 15, color: on ? "#f4f4f0" : "#4a5568" }}>{label}</span>
-                <div style={{ width: 44, height: 24, borderRadius: 12, background: on ? "#f5c518" : "#1d2530", position: "relative", transition: "background 0.2s", border: "1px solid " + (on ? "#f5c518" : "#2a3543") }}>
-                  <div style={{ position: "absolute", top: 2, left: on ? 22 : 2, width: 18, height: 18, borderRadius: 9, background: on ? "#0a0e14" : "#4a5568", transition: "left 0.2s" }} />
-                </div>
-              </div>
-            );
-          })}
-        </Section>
-        {categories.map(({ key, label }) => (
-          <PlaybookCategory key={key} label={label} items={draft[key]}
-            onRemove={(item) => removeItem(key, item)}
-            onAdd={(val) => addItem(key, val)} />
+      <div style={{ display: "flex", borderBottom: "1px solid #1d2530" }}>
+        {[["arrange", "Arrange"], ["edit", "Edit Lists"]].map(([k, l]) => (
+          <button key={k} onClick={() => setEditorTab(k)} style={{
+            flex: 1, padding: "14px", background: editorTab === k ? "#141a24" : "transparent",
+            color: editorTab === k ? "#f5c518" : "#7a8699", border: "none",
+            borderBottom: editorTab === k ? "2px solid #f5c518" : "2px solid transparent",
+            fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, letterSpacing: 1,
+            textTransform: "uppercase", cursor: "pointer",
+          }}>{l}</button>
         ))}
-        <button onClick={handleSave} disabled={saving} style={{
-          width: "100%", marginTop: 8, padding: "18px", borderRadius: 12, border: "none",
-          background: saving ? "#1d2530" : "#f5c518", color: saving ? "#4a5568" : "#0a0e14",
-          fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: 1.5,
-          textTransform: "uppercase", cursor: saving ? "not-allowed" : "pointer",
-        }}>{saving ? "Saving…" : "Save Playbook"}</button>
+      </div>
+
+      <div style={{ padding: 16 }}>
+        {editorTab === "arrange" && (
+          <>
+            <div style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 20, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
+              Drag ≡ to reorder. Changes save immediately for the whole staff.
+            </div>
+
+            <Section label="Form Section Order">
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleSectionDragEnd}>
+                <SortableContext items={layoutDraft.sectionOrder} strategy={verticalListSortingStrategy}>
+                  <div style={{ background: "#141a24", border: "1px solid #2a3543", borderRadius: 12, padding: "0 12px" }}>
+                    {layoutDraft.sectionOrder.map((key) => (
+                      <SortableRow key={key} id={key}>
+                        <span style={{ fontFamily: FONT_BODY, fontSize: 15, color: "#c4cdda" }}>{SECTION_LABELS[key]}</span>
+                      </SortableRow>
+                    ))}
+                  </div>
+                </SortableContext>
+              </DndContext>
+            </Section>
+
+            {chipSections.map(({ id, label, chips }) => {
+              const ordered = getLayoutChips(id, chips);
+              return (
+                <Section key={id} label={`${label} · drag ≡ to reorder`}>
+                  <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={makeChipDragEnd(id, chips)}>
+                    <SortableContext items={ordered} strategy={rectSortingStrategy}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        {ordered.map((chip) => (
+                          <SortableChipItem key={chip} id={chip}>{chip}</SortableChipItem>
+                        ))}
+                      </div>
+                    </SortableContext>
+                  </DndContext>
+                </Section>
+              );
+            })}
+          </>
+        )}
+
+        {editorTab === "edit" && (
+          <>
+            <div style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 20, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
+              Tap × to remove an item. Type a name and press + or Enter to add one.
+            </div>
+            <Section label="Visible Sections · toggle off sections your team doesn't use">
+              {sectionToggles.map(({ key, label }) => {
+                const on = (draft.sections ?? DEFAULT_PLAYBOOK.sections)[key];
+                return (
+                  <div key={key} onClick={() => toggleSection(key)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 4px", borderBottom: "1px solid #1d2530", cursor: "pointer" }}>
+                    <span style={{ fontFamily: FONT_BODY, fontSize: 15, color: on ? "#f4f4f0" : "#4a5568" }}>{label}</span>
+                    <div style={{ width: 44, height: 24, borderRadius: 12, background: on ? "#f5c518" : "#1d2530", position: "relative", transition: "background 0.2s", border: "1px solid " + (on ? "#f5c518" : "#2a3543") }}>
+                      <div style={{ position: "absolute", top: 2, left: on ? 22 : 2, width: 18, height: 18, borderRadius: 9, background: on ? "#0a0e14" : "#4a5568", transition: "left 0.2s" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </Section>
+            {categories.map(({ key, label }) => (
+              <PlaybookCategory key={key} label={label} items={draft[key]}
+                onRemove={(item) => removeItem(key, item)}
+                onAdd={(val) => addItem(key, val)} />
+            ))}
+            <button onClick={handleSave} disabled={saving} style={{
+              width: "100%", marginTop: 8, padding: "18px", borderRadius: 12, border: "none",
+              background: saving ? "#1d2530" : "#f5c518", color: saving ? "#4a5568" : "#0a0e14",
+              fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: 1.5,
+              textTransform: "uppercase", cursor: saving ? "not-allowed" : "pointer",
+            }}>{saving ? "Saving…" : "Save Playbook"}</button>
+          </>
+        )}
       </div>
     </Shell>
   );
@@ -754,11 +900,29 @@ function PlaybookCategory({ label, items, onRemove, onAdd }) {
 }
 
 // =================== SINGLE GAME ===================
-function Game({ id, label, playbook, isHeadCoach, onBack }) {
+function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
   const { personnel: PERSONNEL, formations: FORMATIONS, formTags: FORM_TAGS,
     positions: POSITIONS, rpoTags: RPO_TAGS, runPlays: RUN_PLAYS, passPlays: PASS_PLAYS } = playbook;
-  const MOTIONS = ["None", ...playbook.motions];
   const sec = playbook.sections ?? DEFAULT_PLAYBOOK.sections;
+
+  const sectionOrder = [
+    ...(layout?.sectionOrder || DEFAULT_SECTION_ORDER),
+    ...DEFAULT_SECTION_ORDER.filter(s => !(layout?.sectionOrder || DEFAULT_SECTION_ORDER).includes(s)),
+  ];
+
+  function orderedChips(sectionId, baseChips) {
+    const saved = layout?.chipOrder?.[sectionId];
+    if (!saved?.length) return baseChips;
+    return [...saved.filter(c => baseChips.includes(c)), ...baseChips.filter(c => !saved.includes(c))];
+  }
+
+  const ORD_PERSONNEL = orderedChips("personnel", PERSONNEL);
+  const ORD_FORMATIONS = orderedChips("formation", FORMATIONS);
+  const ORD_FORM_TAGS = orderedChips("formTags", FORM_TAGS);
+  const ORD_MOTIONS = ["None", ...orderedChips("motion", playbook.motions)];
+  const ORD_RUN_PLAYS = orderedChips("runPlay", RUN_PLAYS);
+  const ORD_RPO_TAGS = orderedChips("rpoTags", RPO_TAGS);
+  const ORD_PASS_PLAYS = orderedChips("passPlay", PASS_PLAYS);
 
   const [tab, setTab] = useState("log");
   const [mode, setMode] = useState("view");
@@ -912,126 +1076,157 @@ function Game({ id, label, playbook, isHeadCoach, onBack }) {
         <div style={{ padding: 16 }}>
           {editing && (
             <>
-              <Section label="Hash"><div style={{ display: "flex", gap: 8 }}>{HASHES.map((h) => <Chip key={h} active={hash === h} onClick={() => setHash(h)} big>{h}</Chip>)}</div></Section>
-              <Section label="Down & Distance">
-                <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>{[1, 2, 3, 4].map((d) => <Chip key={d} active={down === d} onClick={() => setDown(d)} big>{ordinal(d)}</Chip>)}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span style={{ color: "#7a8699", fontSize: 14, textTransform: "uppercase", letterSpacing: 1 }}>&amp;</span>
-                  <button onClick={() => setDistance(Math.max(distance - 1, 1))} style={stepBtn}>–</button>
-                  <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{distance}</span>
-                  <button onClick={() => setDistance(distance + 1)} style={stepBtn}>+</button>
-                  <span style={{ color: "#7a8699", fontSize: 13 }}>yds to go</span>
-                </div>
-              </Section>
-              {sec.personnel && <Section label="Personnel"><Grid>{PERSONNEL.map((p) => <Chip key={p} active={personnel === p} onClick={() => setPersonnel(personnel === p ? "" : p)}>{p}</Chip>)}</Grid></Section>}
-              <Section label="Formation"><Grid>{FORMATIONS.map((f) => <Chip key={f} active={formation === f} onClick={() => setFormation(f)}>{f}</Chip>)}</Grid></Section>
-              {sec.formTags && <Section label="Formation Tags · tap multiple"><Grid>{FORM_TAGS.map((t) => <Chip key={t} active={formTags.includes(t)} onClick={() => toggle(formTags, setFormTags, t)}>{t}</Chip>)}</Grid></Section>}
-              {sec.motion && <Section label="Shift / Motion">
-                <Grid>{MOTIONS.map((m) => <Chip key={m} active={motion === m} onClick={() => { setMotion(m); if (m === "None") setMotionPlayer(""); }}>{m}</Chip>)}</Grid>
-                {motion !== "None" && (
-                  <div style={{ marginTop: 10 }}>
-                    <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's in motion?</div>
-                    <Grid>{POSITIONS.map((p) => <Chip key={p} active={motionPlayer === p} onClick={() => setMotionPlayer(motionPlayer === p ? "" : p)}>{p}</Chip>)}</Grid>
-                  </div>
-                )}
-              </Section>}
-              <Section label="Run Play">
-                <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Carrier</div>
-                <Grid>{["Q", "F", "A", "B", "Y", "X"].map((pos) => <Chip key={pos} active={runCarrier === pos} onClick={() => setRunCarrier(runCarrier === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
-                <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", margin: "12px 0 8px" }}>Play</div>
-                <Grid>{RUN_PLAYS.map((p) => <Chip key={p} active={play === p && playType === "Run"} onClick={() => { setPlay(p); setPlayType("Run"); }}>{p}</Chip>)}</Grid>
-              </Section>
-              {sec.rpo && <Section label="RPO Tags · tap multiple">
-                <Grid>{RPO_TAGS.map((t) => <Chip key={t} active={rpoTags.includes(t)} onClick={() => toggle(rpoTags, setRpoTags, t)}>{t}</Chip>)}</Grid>
-                {rpoTags.length > 0 && (
-                  <div style={{ marginTop: 10 }}>
-                    <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's running the RPO?</div>
-                    <Grid>{POSITIONS.map((p) => <Chip key={p} active={rpoPlayer === p} onClick={() => setRpoPlayer(rpoPlayer === p ? "" : p)}>{p}</Chip>)}</Grid>
-                  </div>
-                )}
-              </Section>}
-              <Section label="Pass Play"><Grid>{PASS_PLAYS.map((p) => <Chip key={p} active={play === p && playType === "Pass"} onClick={() => { setPlay(p); setPlayType("Pass"); }}>{p}</Chip>)}</Grid></Section>
-              <Section label="Result">
-                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                  <Chip active={gainType === "Run"} onClick={() => { setGainType("Run"); setIncomplete(false); }} big>Run</Chip>
-                  <Chip active={gainType === "Pass" && !incomplete} onClick={() => { setGainType("Pass"); setIncomplete(false); }} big>Pass</Chip>
-                  <Chip active={incomplete && gainType === "Pass"} onClick={() => { setGainType("Pass"); setIncomplete(true); setYards(""); setCarrier(""); }} big>Inc</Chip>
-                </div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
-                  <Chip active={gainType === "TD"} onClick={() => { setGainType("TD"); setIncomplete(false); }} big>TD</Chip>
-                  <Chip active={gainType === "INT"} onClick={() => { setGainType("INT"); setIncomplete(true); setYards(""); setCarrier(""); }} big>INT</Chip>
-                  <Chip active={gainType === "Fumble"} onClick={() => { setGainType("Fumble"); setIncomplete(false); }} big>Fumble</Chip>
-                  <Chip active={gainType === "Safety"} onClick={() => { setGainType("Safety"); setIncomplete(true); setYards(""); setCarrier(""); }} big>Safety</Chip>
-                  <Chip active={gainType === "Sack"} onClick={() => { setGainType("Sack"); setIncomplete(false); }} big>Sack</Chip>
-                </div>
-                {gainType === "INT" ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INTERCEPTION — 0 yards</div>
-                  : gainType === "Safety" ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>SAFETY — 0 yards</div>
-                  : incomplete ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INCOMPLETE — 0 yards</div>
-                  : (
-                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                    <button onClick={() => setYards(String((parseInt(yards, 10) || 0) - 1))} style={stepBtn}>–</button>
-                    <input value={yards} onChange={(e) => setYards(e.target.value.replace(/[^-0-9]/g, ""))} placeholder="0" inputMode="numeric"
-                      style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, width: 90, textAlign: "center", background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, color: "#f5c518", padding: "6px 0" }} />
-                    <button onClick={() => setYards(String((parseInt(yards, 10) || 0) + 1))} style={stepBtn}>+</button>
-                    <span style={{ color: "#7a8699", fontSize: 13 }}>{gainType === "Sack" ? "yards lost" : "yards gained"}</span>
-                  </div>
-                )}
-              </Section>
-              {playType === "Pass" && gainType !== "Sack" && (
-                <Section label="Passer #">
-                  {usedPassers.length > 0 && <Grid>{usedPassers.map((n) => <Chip key={n} active={passer === n} onClick={() => setPasser(passer === n ? "" : n)}>#{n}</Chip>)}</Grid>}
-                  <input value={passer} onChange={(e) => setPasser(e.target.value.replace(/[^0-9]/g, ""))} placeholder="QB jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: usedPassers.length ? 10 : 0 }} />
-                </Section>
-              )}
-              {gainType === "Fumble" && (
-                <Section label="Fumble Details">
-                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who forced the fumble?</div>
-                  <Grid>{DEF_POS.map((pos) => <Chip key={pos} active={fumbleForcerPos === pos} onClick={() => setFumbleForcerPos(fumbleForcerPos === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
-                  <input value={fumbleForcerNum} onChange={(e) => setFumbleForcerNum(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Defender jersey #" inputMode="numeric" style={{ ...inputStyle, marginTop: 10 }} />
-                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginTop: 14, marginBottom: 8 }}>Recovered by</div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <Chip active={fumbleRecovery === "Offense"} onClick={() => setFumbleRecovery(fumbleRecovery === "Offense" ? "" : "Offense")} big>Offense</Chip>
-                    <Chip active={fumbleRecovery === "Defense"} onClick={() => setFumbleRecovery(fumbleRecovery === "Defense" ? "" : "Defense")} big>Defense</Chip>
-                  </div>
-                </Section>
-              )}
-              {gainType === "INT" && (
-                <Section label="Interception Details">
-                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who made the INT?</div>
-                  <Grid>{DEF_POS.map((pos) => <Chip key={pos} active={intByPos === pos} onClick={() => setIntByPos(intByPos === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
-                  <input value={intByNum} onChange={(e) => setIntByNum(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Defender jersey #" inputMode="numeric" style={{ ...inputStyle, marginTop: 10 }} />
-                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginTop: 14, marginBottom: 8 }}>Return yards</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                    <button onClick={() => setIntReturn(String(Math.max(0, (parseInt(intReturn, 10) || 0) - 1)))} style={stepBtn}>–</button>
-                    <input value={intReturn} onChange={(e) => setIntReturn(e.target.value.replace(/[^0-9]/g, ""))} placeholder="0" inputMode="numeric" style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, width: 90, textAlign: "center", background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, color: "#f5c518", padding: "6px 0" }} />
-                    <button onClick={() => setIntReturn(String((parseInt(intReturn, 10) || 0) + 1))} style={stepBtn}>+</button>
-                    <span style={{ color: "#7a8699", fontSize: 13 }}>return yards</span>
-                  </div>
-                </Section>
-              )}
-              {sec.carrier && !incomplete && (
-                <Section label="Ball Carrier / Receiver #">
-                  {usedCarriers.length > 0 && <Grid>{usedCarriers.map((n) => <Chip key={n} active={carrier === n} onClick={() => setCarrier(carrier === n ? "" : n)}>#{n}</Chip>)}</Grid>}
-                  <input value={carrier} onChange={(e) => setCarrier(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: usedCarriers.length ? 10 : 0 }} />
-                </Section>
-              )}
-              {sec.tackler && <Section label={gainType === "Sack" ? "Sack / TFL — Defender" : "Tackled By (Defender)"}>
-                <Grid>{DEF_POS.map((pos) => <Chip key={pos} active={tacklerPos === pos} onClick={() => setTacklerPos(tacklerPos === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
-                {usedTacklers.length > 0 && <div style={{ marginTop: 10 }}><Grid>{usedTacklers.map((n) => <Chip key={n} active={tacklerNum === n} onClick={() => { const sel = tacklerNum === n; setTacklerNum(sel ? "" : n); if (!sel && defPosMap[n]) setTacklerPos(defPosMap[n]); }}>{defLabel(n)}</Chip>)}</Grid></div>}
-                <input value={tacklerNum} onChange={(e) => setTacklerNum(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Defender jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: 10 }} />
-                {topTacklers.length > 0 && (
-                  <div style={{ marginTop: 14, background: "#11161f", borderRadius: 10, padding: "12px 14px", border: "1px solid #1d2530" }}>
-                    <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Top Tacklers · Opponent</div>
-                    {topTacklers.map(([num, ct], i) => (
-                      <div key={num} style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0" }}>
-                        <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, color: ["#f5c518", "#c4cdda", "#cd7f32"][i], fontSize: 16, minWidth: 18 }}>{i + 1}</span>
-                        <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 16 }}>{defLabel(num)}</span>
-                        <span style={{ marginLeft: "auto", color: "#a8b3c4", fontSize: 14 }}>{ct} {ct === 1 ? "tackle" : "tackles"}</span>
+              {sectionOrder.map((key) => {
+                const sectionMap = {
+                  hash: (
+                    <Section label="Hash"><div style={{ display: "flex", gap: 8 }}>{HASHES.map((h) => <Chip key={h} active={hash === h} onClick={() => setHash(h)} big>{h}</Chip>)}</div></Section>
+                  ),
+                  downDistance: (
+                    <Section label="Down & Distance">
+                      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>{[1, 2, 3, 4].map((d) => <Chip key={d} active={down === d} onClick={() => setDown(d)} big>{ordinal(d)}</Chip>)}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        <span style={{ color: "#7a8699", fontSize: 14, textTransform: "uppercase", letterSpacing: 1 }}>&amp;</span>
+                        <button onClick={() => setDistance(Math.max(distance - 1, 1))} style={stepBtn}>–</button>
+                        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{distance}</span>
+                        <button onClick={() => setDistance(distance + 1)} style={stepBtn}>+</button>
+                        <span style={{ color: "#7a8699", fontSize: 13 }}>yds to go</span>
                       </div>
-                    ))}
-                  </div>
-                )}
-              </Section>}
+                    </Section>
+                  ),
+                  personnel: sec.personnel ? (
+                    <Section label="Personnel"><Grid>{ORD_PERSONNEL.map((p) => <Chip key={p} active={personnel === p} onClick={() => setPersonnel(personnel === p ? "" : p)}>{p}</Chip>)}</Grid></Section>
+                  ) : null,
+                  formation: (
+                    <Section label="Formation"><Grid>{ORD_FORMATIONS.map((f) => <Chip key={f} active={formation === f} onClick={() => setFormation(f)}>{f}</Chip>)}</Grid></Section>
+                  ),
+                  formTags: sec.formTags ? (
+                    <Section label="Formation Tags · tap multiple"><Grid>{ORD_FORM_TAGS.map((t) => <Chip key={t} active={formTags.includes(t)} onClick={() => toggle(formTags, setFormTags, t)}>{t}</Chip>)}</Grid></Section>
+                  ) : null,
+                  motion: sec.motion ? (
+                    <Section label="Shift / Motion">
+                      <Grid>{ORD_MOTIONS.map((m) => <Chip key={m} active={motion === m} onClick={() => { setMotion(m); if (m === "None") setMotionPlayer(""); }}>{m}</Chip>)}</Grid>
+                      {motion !== "None" && (
+                        <div style={{ marginTop: 10 }}>
+                          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's in motion?</div>
+                          <Grid>{POSITIONS.map((p) => <Chip key={p} active={motionPlayer === p} onClick={() => setMotionPlayer(motionPlayer === p ? "" : p)}>{p}</Chip>)}</Grid>
+                        </div>
+                      )}
+                    </Section>
+                  ) : null,
+                  runPlay: (
+                    <Section label="Run Play">
+                      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Carrier</div>
+                      <Grid>{["Q", "F", "A", "B", "Y", "X"].map((pos) => <Chip key={pos} active={runCarrier === pos} onClick={() => setRunCarrier(runCarrier === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
+                      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", margin: "12px 0 8px" }}>Play</div>
+                      <Grid>{ORD_RUN_PLAYS.map((p) => <Chip key={p} active={play === p && playType === "Run"} onClick={() => { setPlay(p); setPlayType("Run"); }}>{p}</Chip>)}</Grid>
+                    </Section>
+                  ),
+                  rpoTags: sec.rpo ? (
+                    <Section label="RPO Tags · tap multiple">
+                      <Grid>{ORD_RPO_TAGS.map((t) => <Chip key={t} active={rpoTags.includes(t)} onClick={() => toggle(rpoTags, setRpoTags, t)}>{t}</Chip>)}</Grid>
+                      {rpoTags.length > 0 && (
+                        <div style={{ marginTop: 10 }}>
+                          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who's running the RPO?</div>
+                          <Grid>{POSITIONS.map((p) => <Chip key={p} active={rpoPlayer === p} onClick={() => setRpoPlayer(rpoPlayer === p ? "" : p)}>{p}</Chip>)}</Grid>
+                        </div>
+                      )}
+                    </Section>
+                  ) : null,
+                  passPlay: (
+                    <Section label="Pass Play"><Grid>{ORD_PASS_PLAYS.map((p) => <Chip key={p} active={play === p && playType === "Pass"} onClick={() => { setPlay(p); setPlayType("Pass"); }}>{p}</Chip>)}</Grid></Section>
+                  ),
+                  result: (
+                    <>
+                      <Section label="Result">
+                        <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                          <Chip active={gainType === "Run"} onClick={() => { setGainType("Run"); setIncomplete(false); }} big>Run</Chip>
+                          <Chip active={gainType === "Pass" && !incomplete} onClick={() => { setGainType("Pass"); setIncomplete(false); }} big>Pass</Chip>
+                          <Chip active={incomplete && gainType === "Pass"} onClick={() => { setGainType("Pass"); setIncomplete(true); setYards(""); setCarrier(""); }} big>Inc</Chip>
+                        </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                          <Chip active={gainType === "TD"} onClick={() => { setGainType("TD"); setIncomplete(false); }} big>TD</Chip>
+                          <Chip active={gainType === "INT"} onClick={() => { setGainType("INT"); setIncomplete(true); setYards(""); setCarrier(""); }} big>INT</Chip>
+                          <Chip active={gainType === "Fumble"} onClick={() => { setGainType("Fumble"); setIncomplete(false); }} big>Fumble</Chip>
+                          <Chip active={gainType === "Safety"} onClick={() => { setGainType("Safety"); setIncomplete(true); setYards(""); setCarrier(""); }} big>Safety</Chip>
+                          <Chip active={gainType === "Sack"} onClick={() => { setGainType("Sack"); setIncomplete(false); }} big>Sack</Chip>
+                        </div>
+                        {gainType === "INT" ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INTERCEPTION — 0 yards</div>
+                          : gainType === "Safety" ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>SAFETY — 0 yards</div>
+                          : incomplete ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INCOMPLETE — 0 yards</div>
+                          : (
+                          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                            <button onClick={() => setYards(String((parseInt(yards, 10) || 0) - 1))} style={stepBtn}>–</button>
+                            <input value={yards} onChange={(e) => setYards(e.target.value.replace(/[^-0-9]/g, ""))} placeholder="0" inputMode="numeric"
+                              style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, width: 90, textAlign: "center", background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, color: "#f5c518", padding: "6px 0" }} />
+                            <button onClick={() => setYards(String((parseInt(yards, 10) || 0) + 1))} style={stepBtn}>+</button>
+                            <span style={{ color: "#7a8699", fontSize: 13 }}>{gainType === "Sack" ? "yards lost" : "yards gained"}</span>
+                          </div>
+                        )}
+                      </Section>
+                      {playType === "Pass" && gainType !== "Sack" && (
+                        <Section label="Passer #">
+                          {usedPassers.length > 0 && <Grid>{usedPassers.map((n) => <Chip key={n} active={passer === n} onClick={() => setPasser(passer === n ? "" : n)}>#{n}</Chip>)}</Grid>}
+                          <input value={passer} onChange={(e) => setPasser(e.target.value.replace(/[^0-9]/g, ""))} placeholder="QB jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: usedPassers.length ? 10 : 0 }} />
+                        </Section>
+                      )}
+                      {gainType === "Fumble" && (
+                        <Section label="Fumble Details">
+                          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who forced the fumble?</div>
+                          <Grid>{DEF_POS.map((pos) => <Chip key={pos} active={fumbleForcerPos === pos} onClick={() => setFumbleForcerPos(fumbleForcerPos === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
+                          <input value={fumbleForcerNum} onChange={(e) => setFumbleForcerNum(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Defender jersey #" inputMode="numeric" style={{ ...inputStyle, marginTop: 10 }} />
+                          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginTop: 14, marginBottom: 8 }}>Recovered by</div>
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <Chip active={fumbleRecovery === "Offense"} onClick={() => setFumbleRecovery(fumbleRecovery === "Offense" ? "" : "Offense")} big>Offense</Chip>
+                            <Chip active={fumbleRecovery === "Defense"} onClick={() => setFumbleRecovery(fumbleRecovery === "Defense" ? "" : "Defense")} big>Defense</Chip>
+                          </div>
+                        </Section>
+                      )}
+                      {gainType === "INT" && (
+                        <Section label="Interception Details">
+                          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Who made the INT?</div>
+                          <Grid>{DEF_POS.map((pos) => <Chip key={pos} active={intByPos === pos} onClick={() => setIntByPos(intByPos === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
+                          <input value={intByNum} onChange={(e) => setIntByNum(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Defender jersey #" inputMode="numeric" style={{ ...inputStyle, marginTop: 10 }} />
+                          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginTop: 14, marginBottom: 8 }}>Return yards</div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                            <button onClick={() => setIntReturn(String(Math.max(0, (parseInt(intReturn, 10) || 0) - 1)))} style={stepBtn}>–</button>
+                            <input value={intReturn} onChange={(e) => setIntReturn(e.target.value.replace(/[^0-9]/g, ""))} placeholder="0" inputMode="numeric" style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, width: 90, textAlign: "center", background: "#141a24", border: "1px solid #2a3543", borderRadius: 10, color: "#f5c518", padding: "6px 0" }} />
+                            <button onClick={() => setIntReturn(String((parseInt(intReturn, 10) || 0) + 1))} style={stepBtn}>+</button>
+                            <span style={{ color: "#7a8699", fontSize: 13 }}>return yards</span>
+                          </div>
+                        </Section>
+                      )}
+                    </>
+                  ),
+                  carrier: sec.carrier && !incomplete ? (
+                    <Section label="Ball Carrier / Receiver #">
+                      {usedCarriers.length > 0 && <Grid>{usedCarriers.map((n) => <Chip key={n} active={carrier === n} onClick={() => setCarrier(carrier === n ? "" : n)}>#{n}</Chip>)}</Grid>}
+                      <input value={carrier} onChange={(e) => setCarrier(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: usedCarriers.length ? 10 : 0 }} />
+                    </Section>
+                  ) : null,
+                  tackler: sec.tackler ? (
+                    <Section label={gainType === "Sack" ? "Sack / TFL — Defender" : "Tackled By (Defender)"}>
+                      <Grid>{DEF_POS.map((pos) => <Chip key={pos} active={tacklerPos === pos} onClick={() => setTacklerPos(tacklerPos === pos ? "" : pos)}>{pos}</Chip>)}</Grid>
+                      {usedTacklers.length > 0 && <div style={{ marginTop: 10 }}><Grid>{usedTacklers.map((n) => <Chip key={n} active={tacklerNum === n} onClick={() => { const sel = tacklerNum === n; setTacklerNum(sel ? "" : n); if (!sel && defPosMap[n]) setTacklerPos(defPosMap[n]); }}>{defLabel(n)}</Chip>)}</Grid></div>}
+                      <input value={tacklerNum} onChange={(e) => setTacklerNum(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Defender jersey # (type new)" inputMode="numeric" style={{ ...inputStyle, marginTop: 10 }} />
+                      {topTacklers.length > 0 && (
+                        <div style={{ marginTop: 14, background: "#11161f", borderRadius: 10, padding: "12px 14px", border: "1px solid #1d2530" }}>
+                          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Top Tacklers · Opponent</div>
+                          {topTacklers.map(([num, ct], i) => (
+                            <div key={num} style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0" }}>
+                              <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, color: ["#f5c518", "#c4cdda", "#cd7f32"][i], fontSize: 16, minWidth: 18 }}>{i + 1}</span>
+                              <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 16 }}>{defLabel(num)}</span>
+                              <span style={{ marginLeft: "auto", color: "#a8b3c4", fontSize: 14 }}>{ct} {ct === 1 ? "tackle" : "tackles"}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </Section>
+                  ) : null,
+                };
+                const content = sectionMap[key];
+                if (!content) return null;
+                return <React.Fragment key={key}>{content}</React.Fragment>;
+              })}
               <button onClick={logPlay} disabled={!ready} style={{
                 width: "100%", marginTop: 8, padding: "18px", borderRadius: 12, border: "none",
                 background: ready ? "#f5c518" : "#1d2530", color: ready ? "#0a0e14" : "#4a5568",

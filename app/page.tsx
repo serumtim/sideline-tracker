@@ -33,6 +33,8 @@ const DEFAULT_PLAYBOOK = {
   defCoverages: ["Cover 0", "Cover 1", "Cover 2", "Cover 3", "Cover 4", "Man", "Zone"],
   defBlitz: ["None", "A-Gap", "B-Gap", "Edge", "Corner", "Safety"],
   fieldBdry: ["Field", "Boundary", "Middle"],
+  penalties: ["Holding", "False Start", "Offside", "Encroachment", "Pass Interference", "Personal Foul", "Illegal Procedure", "Delay of Game"],
+  driveOutcomes: ["Touchdown", "Field Goal", "Missed FG", "Punt", "Turnover on Downs", "Interception", "Fumble", "Blocked Punt", "Blocked FG", "Safety", "End of Half", "End of Game"],
   defSections: {
     oppPersonnel: true, oppFormTags: true, oppMotion: true,
     defFront: true, defCoverage: true, defBlitz: true,
@@ -62,13 +64,17 @@ const DEF_SECTION_LABELS = {
 };
 
 function mergeLayout(saved) {
+  let result;
   if (saved && (saved.offense !== undefined || saved.defense !== undefined)) {
-    return {
+    result = {
       offense: { ...DEFAULT_LAYOUT, ...saved.offense },
       defense: { ...DEFAULT_DEF_LAYOUT, ...saved.defense },
     };
+  } else {
+    result = { offense: { ...DEFAULT_LAYOUT, ...(saved || {}) }, defense: DEFAULT_DEF_LAYOUT };
   }
-  return { offense: { ...DEFAULT_LAYOUT, ...(saved || {}) }, defense: DEFAULT_DEF_LAYOUT };
+  if (saved?.fpDisplayMode) result.fpDisplayMode = saved.fpDisplayMode;
+  return result;
 }
 
 const US_STATES = [
@@ -83,10 +89,12 @@ const FONT_BODY = "'Barlow', system-ui, sans-serif";
 
 function calcTendencies(plays) {
   const byPersonnel = {}, byFormation = {}, byPlay = {}, byGain = {}, byDown = {}, byHash = {}, byCarrier = {};
-  let totalYards = 0;
+  let totalYards = 0, playCount = 0;
   plays.forEach((p) => {
+    if (p.type === "punt") return;
+    playCount++;
     totalYards += p.yards;
-    const playLabel = (p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play;
+    const playLabel = p.gainType === "Sack" ? (p.play || "Sack") : (p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : (p.play || "—");
     for (const [obj, k] of [[byPersonnel, p.personnel], [byFormation, p.formation], [byPlay, playLabel], [byGain, p.gainType || "—"], [byDown, p.down], [byHash, p.hash]]) {
       (obj[k] ??= { count: 0, yards: 0 }); obj[k].count++; obj[k].yards += p.yards;
     }
@@ -95,7 +103,7 @@ function calcTendencies(plays) {
       (byCarrier[k] ??= { count: 0, yards: 0 }); byCarrier[k].count++; byCarrier[k].yards += p.yards;
     }
   });
-  return { byPersonnel, byFormation, byPlay, byGain, byDown, byHash, byCarrier, totalYards, avg: plays.length ? (totalYards / plays.length).toFixed(1) : "0.0" };
+  return { byPersonnel, byFormation, byPlay, byGain, byDown, byHash, byCarrier, totalYards, avg: playCount ? (totalYards / playCount).toFixed(1) : "0.0" };
 }
 
 function calcDefTendencies(plays) {
@@ -118,6 +126,44 @@ function calcDefTendencies(plays) {
     }
   });
   return { byPersonnel, byFormation, byPlay, byGain, byDown, byHash, byCarrier, byFront, byCoverage, byBlitz, byFieldBdry, totalYards, avg: plays.length ? (totalYards / plays.length).toFixed(1) : "0.0" };
+}
+
+// =================== FIELD POSITION HELPERS ===================
+// Internal storage: ytdg = abs = yards from OUR own end zone (1–99).
+// Own X = abs X (X yards from our EZ, X < 50).
+// Opp X = abs (100-X) (X yards from their EZ, abs > 50).
+// Offense gains INCREASE abs. Defense (opponent) gains DECREASE abs.
+// Own/Opp display: abs < 50 → "Own {abs}", abs > 50 → "Opp {100-abs}", abs == 50 → "50"
+// ±50 display:     abs > 50 → "+{abs-50}", abs < 50 → "−{50-abs}", abs == 50 → "50"
+function ytdgLabel(n, mode) {
+  if (n === null || n === undefined) return null;
+  if (n === 50) return "50";
+  if (mode === "pm50") {
+    if (n > 50) return `+${n - 50}`;
+    return `−${50 - n}`;
+  }
+  if (n < 50) return `Own ${n}`;
+  return `Opp ${100 - n}`;
+}
+// Max distance cap: on offense 1st & Goal when abs >= 90 (≤ Opp 10); on defense when abs ≤ 10 (≤ Own 10)
+function ytdgMaxDist(n, side) {
+  if (n == null) return 99;
+  if (side === "offense") return n >= 90 ? 100 - n : 99;
+  return n <= 10 ? n : 99;
+}
+function fpLabel(pos, mode) {
+  // Handles both old {territory,yard} format (legacy plays) and new ytdg number format
+  if (pos === null || pos === undefined) return null;
+  if (typeof pos === "number") return ytdgLabel(pos, mode);
+  if (pos.territory === "50") return "50";
+  return `${pos.territory === "own" ? "Own" : "Opp"} ${pos.yard}`;
+}
+// Keep for migration of old game_state.ballPosition objects
+function fpToAbs(pos) {
+  if (!pos || typeof pos !== "object") return null;
+  if (pos.territory === "50") return 50;
+  if (pos.territory === "own") return pos.yard;
+  return 100 - pos.yard;
 }
 
 // =================== ROOT ===================
@@ -285,7 +331,7 @@ export default function PlayTracker() {
 
   const active = gamesIndex.find((g) => g.id === activeId);
   return (
-    <Game id={activeId} label={active?.label || "Game"} playbook={playbook} layout={layout}
+    <Game id={activeId} label={active?.label || "Game"} gameDate={active?.created_at || null} playbook={playbook} layout={layout}
       isHeadCoach={isHeadCoach}
       onBack={() => { setScreen("games"); loadIndex(); }} />
   );
@@ -801,6 +847,7 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
   const [layoutDraft, setLayoutDraft] = useState({
     offense: { ...DEFAULT_LAYOUT, ...layout?.offense },
     defense: { ...DEFAULT_DEF_LAYOUT, ...layout?.defense },
+    fpDisplayMode: layout?.fpDisplayMode ?? "ownOpp",
   });
   const [editorTab, setEditorTab] = useState("arrange");
   const [pbSide, setPbSide] = useState("offense");
@@ -859,6 +906,8 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
     { key: "formTags", label: "Formation Tags" }, { key: "runPlays", label: "Run Plays" },
     { key: "passPlays", label: "Pass Plays" }, { key: "motions", label: "Motions (None is always available)" },
     { key: "positions", label: "Positions" }, { key: "rpoTags", label: "RPO Tags" },
+    { key: "penalties", label: "Penalty Types" },
+    { key: "driveOutcomes", label: "Drive Outcome Labels" },
   ];
   const defCategories = [
     { key: "oppPersonnel", label: "Their Personnel Groups" }, { key: "oppFormations", label: "Their Formations" },
@@ -866,7 +915,10 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
     { key: "oppPassPlays", label: "Their Pass Plays" }, { key: "oppMotions", label: "Their Motions" },
     { key: "defFronts", label: "Our Fronts" }, { key: "defCoverages", label: "Our Coverages" },
     { key: "defBlitz", label: "Blitz Tags" }, { key: "fieldBdry", label: "Field / Boundary" },
+    { key: "penalties", label: "Penalty Types" },
+    { key: "driveOutcomes", label: "Drive Outcome Labels" },
   ];
+  const penaltyChipSection = { id: "penalties", label: "Penalty Types", chips: draft.penalties ?? DEFAULT_PLAYBOOK.penalties };
   const offChipSections = [
     { id: "personnel", label: "Personnel", chips: draft.personnel },
     { id: "formation", label: "Formations", chips: draft.formations },
@@ -875,6 +927,8 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
     { id: "runPlay", label: "Run Plays", chips: draft.runPlays },
     { id: "rpoTags", label: "RPO Tags", chips: draft.rpoTags },
     { id: "passPlay", label: "Pass Plays", chips: draft.passPlays },
+    penaltyChipSection,
+    { id: "driveOutcomes", label: "Drive Outcome Labels", chips: draft.driveOutcomes ?? DEFAULT_PLAYBOOK.driveOutcomes },
   ];
   const defChipSections = [
     { id: "oppPersonnel", label: "Their Personnel", chips: draft.oppPersonnel ?? DEFAULT_PLAYBOOK.oppPersonnel },
@@ -887,6 +941,7 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
     { id: "defCoverage", label: "Our Coverages", chips: draft.defCoverages ?? DEFAULT_PLAYBOOK.defCoverages },
     { id: "defBlitz", label: "Blitz Tags", chips: draft.defBlitz ?? DEFAULT_PLAYBOOK.defBlitz },
     { id: "fieldBdry", label: "Field / Boundary", chips: draft.fieldBdry ?? DEFAULT_PLAYBOOK.fieldBdry },
+    penaltyChipSection,
   ];
   const chipSections = pbSide === "offense" ? offChipSections : defChipSections;
   const curLabels = pbSide === "offense" ? SECTION_LABELS : DEF_SECTION_LABELS;
@@ -919,6 +974,26 @@ function PlaybookEditor({ playbook, onSave, layout, onSaveLayout, onBack }) {
             <div style={{ background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 20, border: "1px solid #1d2530", fontSize: 13, color: "#a8b3c4" }}>
               Drag ≡ to reorder. Changes save immediately for the whole staff.
             </div>
+
+            <Section label="Field Position Display">
+              <div style={{ fontSize: 13, color: "#a8b3c4", marginBottom: 12 }}>How field position labels appear on this device for both sides.</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {[["ownOpp", "Own / Opp", "Own 25, Opp 10 — standard football notation"], ["pm50", "±50", "+25, −10 — yards from midfield"]].map(([val, label, desc]) => (
+                  <button key={val} onClick={() => {
+                    const next = { ...layoutDraft, fpDisplayMode: val };
+                    setLayoutDraft(next); onSaveLayout(next);
+                  }} style={{
+                    flex: 1, padding: "14px 8px", borderRadius: 10, border: `2px solid ${layoutDraft.fpDisplayMode === val ? "#f5c518" : "#1d2530"}`,
+                    background: layoutDraft.fpDisplayMode === val ? "#1a1a0e" : "#141a24",
+                    color: layoutDraft.fpDisplayMode === val ? "#f5c518" : "#a8b3c4",
+                    fontFamily: FONT_DISPLAY, fontSize: 15, fontWeight: 700, letterSpacing: 1, cursor: "pointer", textAlign: "center",
+                  }}>
+                    <div>{label}</div>
+                    <div style={{ fontFamily: FONT_BODY, fontSize: 11, marginTop: 4, color: layoutDraft.fpDisplayMode === val ? "#c8b84a" : "#4a5568", letterSpacing: 0, fontWeight: 400 }}>{desc}</div>
+                  </button>
+                ))}
+              </div>
+            </Section>
 
             <Section label="Form Section Order">
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleSectionDragEnd}>
@@ -1020,7 +1095,7 @@ function PlaybookCategory({ label, items, onRemove, onAdd }) {
 }
 
 // =================== SINGLE GAME ===================
-function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
+function Game({ id, label, gameDate, playbook, layout, isHeadCoach, onBack }) {
   const { personnel: PERSONNEL, formations: FORMATIONS, formTags: FORM_TAGS,
     positions: POSITIONS, rpoTags: RPO_TAGS, runPlays: RUN_PLAYS, passPlays: PASS_PLAYS } = playbook;
   const sec = playbook.sections ?? DEFAULT_PLAYBOOK.sections;
@@ -1077,6 +1152,61 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
   const [syncing, setSyncing] = useState(false);
   const [tendSide, setTendSide] = useState("offense");
 
+  // Ball tracking
+  const [ytdg, setYtdg] = useState(null); // yardsToDefendingGoal: 1-99, or null
+  const [driveNumber, setDriveNumber] = useState(1);
+  const [showNewDrive, setShowNewDrive] = useState(false);
+  const [ndTerritory, setNdTerritory] = useState("own"); // "own" | "50" | "opp"
+  const [ndYard, setNdYard] = useState(25);
+  const [ndPmValue, setNdPmValue] = useState(-25); // for ±50 mode: -49 to 49 (0 = midfield); -25 = Own 25
+  const [needNewDrive, setNeedNewDrive] = useState(false);
+  const fpDisplayMode = layout?.fpDisplayMode ?? "ownOpp";
+
+  // Penalty form state
+  const [showPenalty, setShowPenalty] = useState(false);
+  const [penaltyType, setPenaltyType] = useState("");
+  const [penaltyOnUs, setPenaltyOnUs] = useState(true);
+  const [penaltyYards, setPenaltyYards] = useState(5);
+  const [penaltyAutoFirst, setPenaltyAutoFirst] = useState(false);
+  const [penaltyReplay, setPenaltyReplay] = useState(false);
+
+  // Punt form state
+  const [showPunt, setShowPunt] = useState(false);
+  const [puntDist, setPuntDist] = useState(35);
+  const [puntReturn, setPuntReturn] = useState(0);
+  const [puntResult, setPuntResult] = useState("Returned");
+
+  // End Drive form state
+  const [showEndDrive, setShowEndDrive] = useState(false);
+  const [endDriveOutcome, setEndDriveOutcome] = useState("");
+
+  // Scoreboard
+  const [usScore, setUsScore] = useState(0);
+  const [themScore, setThemScore] = useState(0);
+  const [drives, setDrives] = useState([]); // [{driveNumber,quarter,clock,usScore,themScore}]
+  // New Drive — scoreboard fields
+  const [ndQuarter, setNdQuarter] = useState(1);
+  const [ndClockMin, setNdClockMin] = useState(12);
+  const [ndClockSec, setNdClockSec] = useState(0);
+  const [ndUsScore, setNdUsScore] = useState(0);
+  const [ndThemScore, setNdThemScore] = useState(0);
+  // Scoring prompt (appears after TD/FG/Safety)
+  const [showScorePrompt, setShowScorePrompt] = useState(false);
+  const [scoringTeam, setScoringTeam] = useState("us"); // "us"|"them"
+  const [scorePromptType, setScorePromptType] = useState("td"); // "td"|"safety"|"fg"
+  // Manual score edit overlay
+  const [showScoreEdit, setShowScoreEdit] = useState(false);
+  // Tendencies sub-tab
+  const [tendSubTab, setTendSubTab] = useState("stats");
+
+  // Reports
+  const [reportView, setReportView] = useState(null); // null | "onepager" | "selfscout"
+  const [pdfExporting, setPdfExporting] = useState(false);
+
+  // Keep scores+drives in a ref so persistGameState (a stable callback) can read current values
+  const scoreRef = React.useRef({ drives: [], usScore: 0, themScore: 0 });
+  React.useEffect(() => { scoreRef.current = { drives, usScore, themScore }; }, [drives, usScore, themScore]);
+
   // Offensive form state
   const [personnel, setPersonnel] = useState("");
   const [formation, setFormation] = useState("");
@@ -1125,15 +1255,29 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
   const [defFieldBdry, setDefFieldBdry] = useState("");
 
   const editing = mode === "edit";
-  const offReady = editing && formation && play && (yards !== "" || incomplete);
-  const defReady = editing && defOppFormation && defPlay && (defYards !== "" || defIncomplete);
+  const offReady = editing && formation && (play || gainType === "Sack") && (yards !== "" || incomplete || gainType === "FG" || gainType === "Sack");
+  const defReady = editing && defOppFormation && (defPlay || defGainType === "Sack") && (defYards !== "" || defIncomplete || defGainType === "Sack");
   const activePlays = side === "offense" ? offPlays : defPlays;
 
   const fetchGame = useCallback(async () => {
     try {
       setSyncing(true);
-      const { data } = await supabase.from("games").select("offensive_plays, defensive_plays").eq("id", id).single();
-      if (data) { setOffPlays(data.offensive_plays || []); setDefPlays(data.defensive_plays || []); }
+      const { data } = await supabase.from("games").select("offensive_plays, defensive_plays, game_state").eq("id", id).single();
+      if (data) {
+        setOffPlays(data.offensive_plays || []);
+        setDefPlays(data.defensive_plays || []);
+        if (data.game_state?.ytdg != null) {
+          setYtdg(data.game_state.ytdg);
+        } else if (data.game_state?.ballPosition) {
+          // Migrate old {territory,yard} format — assume offense perspective
+          const oldAbs = fpToAbs(data.game_state.ballPosition);
+          if (oldAbs !== null) setYtdg(oldAbs);
+        }
+        if (data.game_state?.driveNumber) setDriveNumber(data.game_state.driveNumber);
+        if (data.game_state?.drives) setDrives(data.game_state.drives);
+        if (data.game_state?.usScore != null) setUsScore(data.game_state.usScore);
+        if (data.game_state?.themScore != null) setThemScore(data.game_state.themScore);
+      }
     } catch (e) {}
     setSyncing(false); setLoaded(true);
   }, [id]);
@@ -1144,7 +1288,20 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
     const channel = supabase
       .channel(`game-${id}`)
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "games", filter: `id=eq.${id}` },
-        (payload) => { setOffPlays(payload.new.offensive_plays || []); setDefPlays(payload.new.defensive_plays || []); })
+        (payload) => {
+          setOffPlays(payload.new.offensive_plays || []);
+          setDefPlays(payload.new.defensive_plays || []);
+          if (payload.new.game_state?.ytdg != null) {
+            setYtdg(payload.new.game_state.ytdg);
+          } else if (payload.new.game_state?.ballPosition) {
+            const oldAbs = fpToAbs(payload.new.game_state.ballPosition);
+            if (oldAbs !== null) setYtdg(oldAbs);
+          }
+          if (payload.new.game_state?.driveNumber) setDriveNumber(payload.new.game_state.driveNumber);
+          if (payload.new.game_state?.drives) setDrives(payload.new.game_state.drives);
+          if (payload.new.game_state?.usScore != null) setUsScore(payload.new.game_state.usScore);
+          if (payload.new.game_state?.themScore != null) setThemScore(payload.new.game_state.themScore);
+        })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [id]);
@@ -1162,7 +1319,88 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
     catch (e) { console.error(e); }
   }, [id]);
 
+  const persistGameState = useCallback(async (newYtdg, newDriveNum, overrides = {}) => {
+    const { drives: d, usScore: us, themScore: them } = scoreRef.current;
+    try {
+      await supabase.from("games").update({
+        game_state: { ytdg: newYtdg, driveNumber: newDriveNum, drives: d, usScore: us, themScore: them, ...overrides }
+      }).eq("id", id);
+    }
+    catch (e) { console.error(e); }
+  }, [id]);
+
+  function startNewDrive() {
+    let newYtdg;
+    if (fpDisplayMode === "pm50") {
+      const clamped = Math.max(-49, Math.min(49, ndPmValue || 0));
+      newYtdg = Math.max(1, Math.min(99, 50 + clamped));
+    } else {
+      if (ndTerritory === "50") newYtdg = 50;
+      else if (ndTerritory === "own") newYtdg = Math.min(49, Math.max(1, ndYard));
+      else newYtdg = Math.min(99, Math.max(51, 100 - ndYard));
+    }
+    const newDrive = driveNumber + (ytdg !== null ? 1 : 0);
+    const cappedDist = Math.min(10, ytdgMaxDist(newYtdg, side));
+
+    // Build clock string from minutes/seconds fields
+    const clockStr = `${ndClockMin}:${String(ndClockSec).padStart(2, "0")}`;
+    // Append this drive's context to the drives array
+    const driveEntry = { driveNumber: newDrive, quarter: ndQuarter, clock: clockStr, usScore: ndUsScore, themScore: ndThemScore };
+    const newDrives = [...scoreRef.current.drives.filter(d => d.driveNumber !== newDrive), driveEntry];
+    setDrives(newDrives);
+    scoreRef.current = { ...scoreRef.current, drives: newDrives };
+
+    setYtdg(newYtdg);
+    setDriveNumber(newDrive);
+    setDown(1);
+    setDistance(cappedDist);
+    setNeedNewDrive(false);
+    setShowNewDrive(false);
+    persistGameState(newYtdg, newDrive, { drives: newDrives, usScore: scoreRef.current.usScore, themScore: scoreRef.current.themScore });
+  }
+
+  function openNewDrivePanel() {
+    setNdUsScore(usScore); setNdThemScore(themScore);
+    setNdQuarter(1); setNdClockMin(12); setNdClockSec(0);
+  }
+
+  function triggerScorePrompt(team, type) {
+    setScoringTeam(team); setScorePromptType(type); setShowScorePrompt(true);
+  }
+
+  function applyScore(pts) {
+    setShowScorePrompt(false);
+    // Tag drive outcome before updating score so drives array is current
+    let outcomeLabel = null;
+    if (scorePromptType === "td") outcomeLabel = "Touchdown";
+    else if (scorePromptType === "fg") outcomeLabel = pts === 3 ? "Field Goal" : "Missed FG";
+    else if (scorePromptType === "safety") outcomeLabel = "Safety";
+    if (outcomeLabel) {
+      const newDrives = scoreRef.current.drives.map(d => d.driveNumber === driveNumber ? { ...d, outcome: outcomeLabel } : d);
+      setDrives(newDrives);
+      scoreRef.current = { ...scoreRef.current, drives: newDrives };
+    }
+    if (pts === 0) {
+      persistGameState(ytdg, driveNumber, { drives: scoreRef.current.drives, usScore: scoreRef.current.usScore, themScore: scoreRef.current.themScore });
+      return;
+    }
+    const newUs = scoringTeam === "us" ? usScore + pts : usScore;
+    const newThem = scoringTeam === "them" ? themScore + pts : themScore;
+    setUsScore(newUs); setThemScore(newThem);
+    scoreRef.current = { ...scoreRef.current, usScore: newUs, themScore: newThem };
+    // pre-fill next drive score so the panel is ready
+    setNdUsScore(newUs); setNdThemScore(newThem);
+    persistGameState(ytdg, driveNumber, { drives: scoreRef.current.drives, usScore: newUs, themScore: newThem });
+  }
+
   function toggle(list, setList, val) { setList(list.includes(val) ? list.filter((x) => x !== val) : [...list, val]); }
+
+  function tagDriveOutcome(driveNum, outcome) {
+    const newDrives = scoreRef.current.drives.map(d => d.driveNumber === driveNum ? { ...d, outcome } : d);
+    setDrives(newDrives);
+    scoreRef.current = { ...scoreRef.current, drives: newDrives };
+    persistGameState(ytdg, driveNumber, { drives: newDrives, usScore: scoreRef.current.usScore, themScore: scoreRef.current.themScore });
+  }
 
   const usedCarriers = useMemo(() => { const s = new Set(); offPlays.forEach((p) => p.carrier && s.add(p.carrier)); return [...s].sort((a, b) => a - b); }, [offPlays]);
   const usedPassers = useMemo(() => { const s = new Set(); offPlays.forEach((p) => p.passer && s.add(p.passer)); return [...s].sort((a, b) => a - b); }, [offPlays]);
@@ -1179,9 +1417,10 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
 
   async function logPlay() {
     if (!offReady) return;
-    const y = incomplete ? 0 : (parseInt(yards, 10) || 0);
+    const y = gainType === "Sack" ? -(Math.abs(parseInt(yards, 10) || 0)) : incomplete ? 0 : (parseInt(yards, 10) || 0);
     const newPlay = {
-      id: Date.now() + Math.random(), personnel: personnel || "—", formation, formTags: [...formTags],
+      id: Date.now() + Math.random(), driveNumber, fieldPos: ytdg ?? null,
+      personnel: personnel || "—", formation, formTags: [...formTags],
       rpoTags: [...rpoTags], rpoPlayer: rpoTags.length > 0 ? rpoPlayer : "",
       motion, motionPlayer: motion !== "None" ? motionPlayer : "",
       hash, down, distance, play, playType, yards: y,
@@ -1197,8 +1436,30 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
     };
     const next = [newPlay, ...offPlays];
     setOffPlays(next); persist(next, "offense");
-    if (gainType === "TD" || gainType === "INT" || gainType === "Safety") { setDown(1); setDistance(10); }
-    else { const g = y >= distance; if (g) { setDown(1); setDistance(10); } else if (down < 4) { setDown(down + 1); setDistance(Math.max(distance - y, 1)); } else { setDown(1); setDistance(10); } }
+    const turnover = gainType === "TD" || gainType === "FG" || gainType === "INT" || gainType === "Safety" || (gainType === "Fumble" && fumbleRecovery === "Defense");
+    if (turnover) {
+      setDown(1); setDistance(10); setNeedNewDrive(true);
+      if (gainType === "INT") tagDriveOutcome(driveNumber, "Interception");
+      else if (gainType === "Fumble" && fumbleRecovery === "Defense") tagDriveOutcome(driveNumber, "Fumble");
+      if (gainType === "TD") triggerScorePrompt("us", "td");
+      else if (gainType === "FG") triggerScorePrompt("us", "fg");
+      else if (gainType === "Safety") triggerScorePrompt("them", "safety"); // we gave up a safety
+    } else {
+      const g = y >= distance;
+      const newDown = g ? 1 : (down < 4 ? down + 1 : 1);
+      const rawDist = g ? 10 : (down < 4 ? Math.max(distance - y, 1) : 10);
+      if (ytdg !== null) {
+        // Offense: gains increase abs (toward their EZ); sack decreases abs
+        const newYtdg = gainType === "Sack" ? ytdg - Math.abs(y) : ytdg + y;
+        if (newYtdg >= 100) { setDown(1); setDistance(10); setNeedNewDrive(true); triggerScorePrompt("us", "td"); } // TD by position
+        else if (newYtdg <= 0) { setDown(1); setDistance(10); setNeedNewDrive(true); triggerScorePrompt("them", "safety"); } // safety
+        else {
+          const cappedDist = Math.min(rawDist, ytdgMaxDist(newYtdg, "offense"));
+          setYtdg(newYtdg); setDown(newDown); setDistance(cappedDist);
+          persistGameState(newYtdg, driveNumber);
+        }
+      } else { setDown(newDown); setDistance(rawDist); }
+    }
     setPlay(""); setPlayType(""); setRunCarrier(""); setYards(""); setGainType(""); setIncomplete(false);
     setCarrier(""); setTacklerPos(""); setTacklerNum(""); setMotion("None"); setMotionPlayer("");
     setFormTags([]); setRpoTags([]); setRpoPlayer("");
@@ -1208,9 +1469,9 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
 
   async function logDefPlay() {
     if (!defReady) return;
-    const y = defIncomplete ? 0 : (parseInt(defYards, 10) || 0);
+    const y = defGainType === "Sack" ? -(Math.abs(parseInt(defYards, 10) || 0)) : defIncomplete ? 0 : (parseInt(defYards, 10) || 0);
     const newPlay = {
-      id: Date.now() + Math.random(),
+      id: Date.now() + Math.random(), driveNumber, fieldPos: ytdg ?? null,
       hash, fieldBdry: defFieldBdry, down, distance,
       oppPersonnel: defOppPersonnel || "—", oppFormation: defOppFormation,
       oppFormTags: [...defOppFormTags], oppMotion: defOppMotion,
@@ -1224,11 +1485,89 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
     };
     const next = [newPlay, ...defPlays];
     setDefPlays(next); persist(next, "defense");
-    if (defGainType === "TD" || defGainType === "INT" || defGainType === "Safety") { setDown(1); setDistance(10); }
-    else { const g = y >= distance; if (g) { setDown(1); setDistance(10); } else if (down < 4) { setDown(down + 1); setDistance(Math.max(distance - y, 1)); } else { setDown(1); setDistance(10); } }
+    const turnover = defGainType === "TD" || defGainType === "INT" || defGainType === "Safety" || defGainType === "Fumble";
+    if (turnover) {
+      setDown(1); setDistance(10); setNeedNewDrive(true);
+      if (defGainType === "INT") tagDriveOutcome(driveNumber, "Interception");
+      else if (defGainType === "Fumble") tagDriveOutcome(driveNumber, "Fumble");
+      if (defGainType === "TD") triggerScorePrompt("them", "td"); // opponent scored
+      else if (defGainType === "Safety") triggerScorePrompt("us", "safety"); // we got a safety
+    } else {
+      const g = y >= distance;
+      const newDown = g ? 1 : (down < 4 ? down + 1 : 1);
+      const rawDist = g ? 10 : (down < 4 ? Math.max(distance - y, 1) : 10);
+      if (ytdg !== null) {
+        // Defense: opponent gains decrease abs (ball toward our EZ); sack increases abs
+        const newYtdg = defGainType === "Sack" ? ytdg + Math.abs(y) : ytdg - y;
+        if (newYtdg <= 0) { setDown(1); setDistance(10); setNeedNewDrive(true); triggerScorePrompt("them", "td"); } // opponent TD by position
+        else if (newYtdg >= 100) { setDown(1); setDistance(10); setNeedNewDrive(true); triggerScorePrompt("us", "safety"); } // safety by position
+        else {
+          const cappedDist = Math.min(rawDist, ytdgMaxDist(newYtdg, "defense"));
+          setYtdg(newYtdg); setDown(newDown); setDistance(cappedDist);
+          persistGameState(newYtdg, driveNumber);
+        }
+      } else { setDown(newDown); setDistance(rawDist); }
+    }
     setDefPlay(""); setDefPlayType(""); setDefYards(""); setDefGainType(""); setDefIncomplete(false);
     setDefCarrier(""); setDefTacklerPos(""); setDefTacklerNum(""); setDefOppMotion("None"); setDefOppMotionPlayer("");
     setDefOppFormTags([]); setDefFieldBdry(""); setDefFront(""); setDefCoverage(""); setDefBlitz(""); setDefOppPersonnel("");
+  }
+
+  async function logPenalty() {
+    if (!penaltyType) return;
+
+    // Against offense = ball goes backward = abs decreases (toward our EZ); favors offense = abs increases
+    const againstOffense = (penaltyOnUs && side === "offense") || (!penaltyOnUs && side === "defense");
+
+    let newYtdg = ytdg;
+    if (ytdg !== null) {
+      newYtdg = Math.max(1, Math.min(99, againstOffense ? ytdg - penaltyYards : ytdg + penaltyYards));
+    }
+
+    let newDown = down;
+    let newDist = distance;
+
+    if (penaltyAutoFirst) {
+      newDown = 1;
+      newDist = newYtdg != null ? Math.min(10, ytdgMaxDist(newYtdg, side)) : 10;
+    } else if (penaltyReplay) {
+      newDist = againstOffense
+        ? Math.max(1, distance + penaltyYards)
+        : Math.max(1, distance - penaltyYards);
+      if (newYtdg != null) newDist = Math.min(newDist, ytdgMaxDist(newYtdg, side));
+    } else {
+      if (againstOffense) {
+        newDist = Math.max(1, distance + penaltyYards);
+        if (newYtdg != null) newDist = Math.min(newDist, ytdgMaxDist(newYtdg, side));
+      } else {
+        const calc = distance - penaltyYards;
+        if (calc <= 0) {
+          newDown = 1;
+          newDist = newYtdg != null ? Math.min(10, ytdgMaxDist(newYtdg, side)) : 10;
+        } else {
+          newDist = calc;
+          if (newYtdg != null) newDist = Math.min(newDist, ytdgMaxDist(newYtdg, side));
+        }
+      }
+    }
+
+    const yds = penaltyOnUs ? -Math.abs(penaltyYards) : Math.abs(penaltyYards);
+    const newPlay = {
+      id: Date.now() + Math.random(), type: "penalty",
+      driveNumber, fieldPos: ytdg ?? null,
+      down, distance, hash,
+      penaltyType, penaltyOnUs, yards: yds, side,
+      penaltyAutoFirst, penaltyReplay,
+      newDown, newDistance: newDist,
+    };
+    if (side === "offense") { const n = [newPlay, ...offPlays]; setOffPlays(n); persist(n, "offense"); }
+    else { const n = [newPlay, ...defPlays]; setDefPlays(n); persist(n, "defense"); }
+
+    if (newYtdg !== ytdg) { setYtdg(newYtdg); persistGameState(newYtdg, driveNumber); }
+    setDown(newDown); setDistance(newDist);
+
+    setShowPenalty(false); setPenaltyType(""); setPenaltyYards(5); setPenaltyOnUs(true);
+    setPenaltyAutoFirst(false); setPenaltyReplay(false);
   }
 
   async function deletePlay(pid) {
@@ -1237,28 +1576,56 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
   }
 
   function exportCSV() {
-    const headers = ["Side", "#", "Hash", "Field/Bdry", "Down", "Distance",
-      "Personnel", "Formation", "Form Tags", "RPO", "RPO Player", "Motion", "Motion Player", "Play", "Gain Type", "Yards", "Incomplete", "Ball Carrier", "Tackled By",
+    const headers = ["Side", "Drive", "Field Pos", "Play #", "Hash", "Field/Bdry", "Down", "Distance",
+      "Personnel", "Formation", "Form Tags", "RPO", "RPO Player", "Motion", "Motion Player", "Play", "Play Type", "Gain Type", "Yards", "Incomplete", "Ball Carrier", "Tackled By",
       "Their Personnel", "Their Formation", "Their Form Tags", "Their Motion", "Their Motion Player", "Their Play",
-      "Our Front", "Our Coverage", "Blitz", "Their Ball Carrier", "Our Tackler"];
+      "Our Front", "Our Coverage", "Blitz", "Their Ball Carrier", "Our Tackler", "Punt Return", "Punt Net"];
     const esc = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-    const offRows = [...offPlays].reverse().map((p, i) => [
-      "Offense", i + 1, p.hash, "", ordinal(p.down), p.distance,
-      p.personnel, p.formation, (p.formTags || []).join(" "), (p.rpoTags || []).join(" "),
-      p.rpoTags?.length > 0 ? (p.rpoPlayer || "") : "", p.motion,
-      p.motion !== "None" ? (p.motionPlayer || "") : "",
-      (p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play,
-      p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", p.carrier || "", p.tackler,
-      "", "", "", "", "", "", "", "", "", "", "",
-    ]);
-    const defRows = [...defPlays].reverse().map((p, i) => [
-      "Defense", i + 1, p.hash, p.fieldBdry || "", ordinal(p.down), p.distance,
-      "", "", "", "", "", "", "", "",
-      p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", "", "",
-      p.oppPersonnel, p.oppFormation, (p.oppFormTags || []).join(" "),
-      p.oppMotion, p.oppMotion !== "None" ? (p.oppMotionPlayer || "") : "", p.play,
-      p.front || "", p.coverage || "", p.blitz || "", p.carrier || "", p.tackler,
-    ]);
+    const allOff = [...offPlays].reverse();
+    const allDef = [...defPlays].reverse();
+    const offRows = allOff.map((p, i) => {
+      if (p.type === "penalty") return [
+        "Offense", p.driveNumber || "", fpLabel(p.fieldPos) || "", i + 1,
+        p.hash || "", "", ordinal(p.down), p.distance,
+        "", "", "", "", "", "", "", "PENALTY", "Penalty",
+        `${p.penaltyOnUs ? "On Us" : "On Them"} — ${p.penaltyType}`, p.yards, "", "", "",
+        "", "", "", "", "", "", "", "", "", "", "", "", "",
+      ];
+      if (p.type === "punt") return [
+        "Offense", p.driveNumber || "", fpLabel(p.fieldPos) || "", i + 1,
+        p.hash || "", "", ordinal(p.down), p.distance,
+        "", "", "", "", "", "", "", "PUNT", "Punt",
+        p.puntResult || "", p.puntDist || 0, "", "", "",
+        "", "", "", "", "", "", "", "", "", "", "", p.puntReturn || 0, p.puntNet || 0,
+      ];
+      return [
+        "Offense", p.driveNumber || "", fpLabel(p.fieldPos) || "", i + 1,
+        p.hash, "", ordinal(p.down), p.distance,
+        p.personnel, p.formation, (p.formTags || []).join(" "), (p.rpoTags || []).join(" "),
+        p.rpoTags?.length > 0 ? (p.rpoPlayer || "") : "", p.motion,
+        p.motion !== "None" ? (p.motionPlayer || "") : "",
+        (p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play,
+        p.playType || "", p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", p.carrier || "", p.tackler,
+        "", "", "", "", "", "", "", "", "", "", "", "", "",
+      ];
+    });
+    const defRows = allDef.map((p, i) => {
+      if (p.type === "penalty") return [
+        "Defense", p.driveNumber || "", fpLabel(p.fieldPos) || "", i + 1,
+        p.hash || "", "", ordinal(p.down), p.distance,
+        "", "", "", "", "", "", "", "PENALTY", "Penalty",
+        `${p.penaltyOnUs ? "On Us" : "On Them"} — ${p.penaltyType}`, p.yards, "", "", "",
+        "", "", "", "", "", "", "", "", "", "", "", "", "",
+      ];
+      return [
+        "Defense", p.driveNumber || "", fpLabel(p.fieldPos) || "", i + 1,
+        p.hash, p.fieldBdry || "", ordinal(p.down), p.distance,
+        "", "", "", "", "", "", "", "", p.playType || "", p.gainType || "", p.incomplete ? 0 : p.yards, p.incomplete ? "INC" : "", "", "",
+        p.oppPersonnel, p.oppFormation, (p.oppFormTags || []).join(" "),
+        p.oppMotion, p.oppMotion !== "None" ? (p.oppMotionPlayer || "") : "", p.play,
+        p.front || "", p.coverage || "", p.blitz || "", p.carrier || "", p.tackler, "", "",
+      ];
+    });
     const csv = [headers, ...offRows, ...defRows].map((r) => r.map(esc).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob); const a = document.createElement("a");
@@ -1266,12 +1633,60 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   }
 
+  function logPunt() {
+    const noReturnResults = ["Fair Catch", "Downed", "Out of Bounds", "Touchback", "Blocked"];
+    const actualReturn = noReturnResults.includes(puntResult) ? 0 : puntReturn;
+    let newAbs = ytdg;
+    let keepPossession = false;
+    if (ytdg != null) {
+      const landing = Math.min(99, ytdg + puntDist);
+      if (puntResult === "Touchback") { newAbs = 80; }
+      else if (puntResult === "Blocked") { newAbs = ytdg; }
+      else if (noReturnResults.includes(puntResult)) { newAbs = Math.max(1, Math.min(98, landing)); }
+      else if (puntResult === "Fumble-Us") { newAbs = Math.max(1, Math.min(99, landing - actualReturn)); keepPossession = true; }
+      else { newAbs = Math.max(1, Math.min(99, landing - actualReturn)); }
+    }
+    const net = ytdg != null ? newAbs - ytdg : puntDist - actualReturn;
+    const newPlay = {
+      id: Date.now() + Math.random(), driveNumber, fieldPos: ytdg ?? null,
+      type: "punt", down, distance, hash,
+      puntDist, puntReturn: actualReturn, puntResult, puntNet: net,
+    };
+    const next = [newPlay, ...offPlays];
+    setOffPlays(next); persist(next, "offense");
+    if (keepPossession) {
+      if (newAbs != null) { setYtdg(newAbs); persistGameState(newAbs, driveNumber); }
+      setDown(1); setDistance(Math.min(10, ytdgMaxDist(newAbs ?? 1, "offense")));
+    } else {
+      tagDriveOutcome(driveNumber, puntResult === "Blocked" ? "Blocked Punt" : "Punt");
+      if (newAbs != null) { setYtdg(newAbs); persistGameState(newAbs, driveNumber); }
+      setDown(1); setDistance(10); setNeedNewDrive(true);
+    }
+    setShowPunt(false); setPuntDist(35); setPuntReturn(0); setPuntResult("Returned");
+  }
+
+  function endDrive() {
+    if (endDriveOutcome) tagDriveOutcome(driveNumber, endDriveOutcome);
+    setNeedNewDrive(true);
+    setShowEndDrive(false);
+    setEndDriveOutcome("");
+  }
+
   const tendencies = useMemo(() => calcTendencies(offPlays), [offPlays]);
   const defTendencies = useMemo(() => calcDefTendencies(defPlays), [defPlays]);
 
   return (
     <Shell subtitle={label} onBack={onBack}
-      right={<span style={{ fontSize: 11, color: syncing ? "#f5c518" : "#3ddc84" }}>{syncing ? "syncing…" : "● live"}</span>}>
+      right={
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button onClick={() => setShowScoreEdit(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "#1d2530", border: "1px solid #2a3543", borderRadius: 10, padding: "6px 12px", cursor: "pointer" }}>
+            <span style={{ fontFamily: FONT_DISPLAY, fontSize: 20, fontWeight: 700, color: "#f5c518", minWidth: 22, textAlign: "right" }}>{usScore}</span>
+            <span style={{ color: "#4a5568", fontSize: 14 }}>–</span>
+            <span style={{ fontFamily: FONT_DISPLAY, fontSize: 20, fontWeight: 700, color: "#c4cdda", minWidth: 22 }}>{themScore}</span>
+          </button>
+          <span style={{ fontSize: 11, color: syncing ? "#f5c518" : "#3ddc84" }}>{syncing ? "sync…" : "●"}</span>
+        </div>
+      }>
 
       {/* Side toggle */}
       <div style={{ display: "flex", gap: 8, padding: "12px 16px", borderBottom: "1px solid #1d2530" }}>
@@ -1285,17 +1700,306 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
       </div>
 
       <div style={{ display: "flex", borderBottom: "1px solid #1d2530" }}>
-        {[["log", editing ? "Log Play" : "Plays"], ["tendencies", "Tendencies"], ["export", "Export"]].map(([k, l]) => (
+        {[["log", editing ? "Log Play" : "Plays"], ["tendencies", "Trends"], ["reports", "Reports"], ["export", "Export"]].map(([k, l]) => (
           <button key={k} onClick={() => setTab(k)} style={{
-            flex: 1, padding: "14px", background: tab === k ? "#141a24" : "transparent", color: tab === k ? "#f5c518" : "#7a8699",
+            flex: 1, padding: "12px 4px", background: tab === k ? "#141a24" : "transparent", color: tab === k ? "#f5c518" : "#7a8699",
             border: "none", borderBottom: tab === k ? "2px solid #f5c518" : "2px solid transparent",
-            fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer",
+            fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase", cursor: "pointer",
           }}>{l}</button>
         ))}
       </div>
 
+      {/* Score edit overlay */}
+      {showScoreEdit && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.7)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div style={{ background: "#141a24", border: "1px solid #2a3543", borderRadius: 16, padding: 24, width: "100%", maxWidth: 360 }}>
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: "#f5c518", marginBottom: 20 }}>Edit Score</div>
+            <div style={{ display: "flex", gap: 16, marginBottom: 24 }}>
+              {[["Us", usScore, setUsScore], ["Them", themScore, setThemScore]].map(([lbl, val, setter]) => (
+                <div key={lbl} style={{ flex: 1, background: "#1d2530", borderRadius: 12, padding: 16, textAlign: "center" }}>
+                  <div style={{ fontSize: 12, color: "#7a8699", letterSpacing: 1, textTransform: "uppercase", marginBottom: 10 }}>{lbl}</div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
+                    <button onClick={() => { const n = Math.max(0, val - 1); setter(n); scoreRef.current = { ...scoreRef.current, usScore: lbl === "Us" ? n : scoreRef.current.usScore, themScore: lbl === "Them" ? n : scoreRef.current.themScore }; }} style={stepBtn}>–</button>
+                    <span style={{ fontFamily: FONT_DISPLAY, fontSize: 36, fontWeight: 700, minWidth: 46, textAlign: "center" }}>{val}</span>
+                    <button onClick={() => { const n = val + 1; setter(n); scoreRef.current = { ...scoreRef.current, usScore: lbl === "Us" ? n : scoreRef.current.usScore, themScore: lbl === "Them" ? n : scoreRef.current.themScore }; }} style={stepBtn}>+</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button onClick={() => {
+              setShowScoreEdit(false);
+              persistGameState(ytdg, driveNumber);
+            }} style={{ width: "100%", padding: "16px", borderRadius: 12, border: "none", background: "#f5c518", color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>Done</button>
+          </div>
+        </div>
+      )}
+
+      {/* Scoring prompt overlay */}
+      {showScorePrompt && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.75)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div style={{ background: "#141a24", border: `2px solid ${scoringTeam === "us" ? "#3ddc84" : "#ff5252"}`, borderRadius: 16, padding: 24, width: "100%", maxWidth: 360 }}>
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: scoringTeam === "us" ? "#3ddc84" : "#ff5252", marginBottom: 6 }}>
+              {scoringTeam === "us" ? "We Scored!" : "They Scored"}
+            </div>
+            <div style={{ fontSize: 13, color: "#a8b3c4", marginBottom: 20 }}>
+              {scorePromptType === "td" ? "Select the result:" : scorePromptType === "fg" ? "Field goal result:" : "Safety — select:"}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+              {scorePromptType === "td" && <>
+                <button onClick={() => applyScore(6)} style={{ flex: 1, minWidth: "40%", padding: "16px 8px", borderRadius: 10, border: "none", background: "#3ddc84", color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, cursor: "pointer" }}>+6 TD</button>
+                <button onClick={() => applyScore(7)} style={{ flex: 1, minWidth: "40%", padding: "16px 8px", borderRadius: 10, border: "none", background: "#2db870", color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, cursor: "pointer" }}>+7 (PAT)</button>
+                <button onClick={() => applyScore(8)} style={{ flex: 1, minWidth: "40%", padding: "16px 8px", borderRadius: 10, border: "none", background: "#259e60", color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, cursor: "pointer" }}>+8 (2-pt)</button>
+              </>}
+              {scorePromptType === "fg" && <>
+                <button onClick={() => applyScore(3)} style={{ flex: 1, padding: "16px 8px", borderRadius: 10, border: "none", background: "#3ddc84", color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, cursor: "pointer" }}>+3 Good</button>
+              </>}
+              {scorePromptType === "safety" && <>
+                <button onClick={() => applyScore(2)} style={{ flex: 1, padding: "16px 8px", borderRadius: 10, border: "none", background: "#3ddc84", color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, cursor: "pointer" }}>+2 Safety</button>
+              </>}
+              <button onClick={() => applyScore(0)} style={{ flex: 1, minWidth: "40%", padding: "16px 8px", borderRadius: 10, border: "1px solid #4a5568", background: "none", color: "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>No Score</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {tab === "log" && (
         <div style={{ padding: 16 }}>
+
+          {/* Ball position banner */}
+          <div style={{ background: "#11161f", border: "1px solid #1d2530", borderRadius: 12, padding: "12px 14px", marginBottom: 12 }}>
+            {ytdg !== null ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 2 }}>Ball · Drive {driveNumber}</div>
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 26, fontWeight: 700, letterSpacing: 1, color: "#f4f4f0" }}>
+                    {ytdgLabel(ytdg, fpDisplayMode)}
+                    {((side === "offense" && ytdg >= 90) || (side === "defense" && ytdg <= 10)) && <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, color: "#f5c518", marginLeft: 10, letterSpacing: 1 }}>GOAL LINE</span>}
+                  </div>
+                </div>
+                {editing && !needNewDrive && !showEndDrive && <button onClick={() => { setEndDriveOutcome(""); setShowEndDrive(true); }} style={{ background: "none", border: "1px solid #ff5252", borderRadius: 8, color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 12, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", padding: "8px 12px", cursor: "pointer" }}>End Drive</button>}
+                {editing && <button onClick={() => {
+                  if (fpDisplayMode === "pm50") { setNdPmValue(ytdg - 50); }
+                  else if (ytdg === 50) { setNdTerritory("50"); setNdYard(25); }
+                  else if (ytdg > 50) { setNdTerritory("opp"); setNdYard(100 - ytdg); }
+                  else { setNdTerritory("own"); setNdYard(ytdg); }
+                  openNewDrivePanel();
+                  setShowNewDrive(true); setNeedNewDrive(false);
+                }} style={{ background: "#1d2530", border: "1px solid #2a3543", borderRadius: 8, color: "#f5c518", fontFamily: FONT_DISPLAY, fontSize: 12, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", padding: "8px 12px", cursor: "pointer" }}>New Drive</button>}
+              </div>
+            ) : (
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ flex: 1, color: "#4a5568", fontSize: 13 }}>No field position set. Tap <b style={{ color: "#7a8699" }}>New Drive</b> to start tracking.</div>
+                {editing && <button onClick={() => {
+                  if (fpDisplayMode === "pm50") setNdPmValue(-25); else { setNdTerritory("own"); setNdYard(25); }
+                  openNewDrivePanel();
+                  setShowNewDrive(true);
+                }} style={{ background: "#f5c518", border: "none", borderRadius: 8, color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 12, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", padding: "8px 12px", cursor: "pointer" }}>New Drive</button>}
+              </div>
+            )}
+          </div>
+
+          {/* Need New Drive banner */}
+          {needNewDrive && (
+            <div style={{ background: "#1a1208", border: "1px solid #f5c518", borderRadius: 12, padding: "12px 14px", marginBottom: 12, display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ flex: 1, fontFamily: FONT_DISPLAY, fontSize: 14, color: "#f5c518", letterSpacing: 1 }}>Drive ended — start the next drive.</div>
+              <button onClick={() => {
+                if (fpDisplayMode === "pm50") setNdPmValue(-25); else { setNdTerritory("own"); setNdYard(25); }
+                openNewDrivePanel();
+                setShowNewDrive(true);
+              }} style={{ background: "#f5c518", border: "none", borderRadius: 8, color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 12, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", padding: "8px 12px", cursor: "pointer" }}>New Drive</button>
+            </div>
+          )}
+
+          {/* New Drive panel */}
+          {showNewDrive && (
+            <div style={{ background: "#141a24", border: "1px solid #f5c518", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: "#f5c518", marginBottom: 14 }}>
+                {ytdg !== null ? `Starting Drive ${driveNumber + 1}` : "Set Starting Field Position"}
+              </div>
+
+              {/* Quarter */}
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Quarter</div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                {[1, 2, 3, 4, "OT"].map((q) => (
+                  <button key={q} onClick={() => setNdQuarter(q)} style={{ flex: 1, padding: "12px 0", borderRadius: 8, border: "none", background: ndQuarter === q ? "#f5c518" : "#1d2530", color: ndQuarter === q ? "#0a0e14" : "#a8b3c4", fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>{q}</button>
+                ))}
+              </div>
+
+              {/* Clock */}
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Clock</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <button onClick={() => setNdClockMin(Math.max(0, ndClockMin - 1))} style={{ ...stepBtn, width: 38, height: 38, fontSize: 20 }}>–</button>
+                    <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 46, textAlign: "center" }}>{ndClockMin}</span>
+                    <button onClick={() => setNdClockMin(Math.min(12, ndClockMin + 1))} style={{ ...stepBtn, width: 38, height: 38, fontSize: 20 }}>+</button>
+                  </div>
+                  <span style={{ fontSize: 11, color: "#4a5568", letterSpacing: 1 }}>MIN</span>
+                </div>
+                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 28, fontWeight: 700, color: "#7a8699", marginBottom: 14 }}>:</span>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <button onClick={() => setNdClockSec(ndClockSec === 0 ? 55 : ndClockSec - 5)} style={{ ...stepBtn, width: 38, height: 38, fontSize: 20 }}>–</button>
+                    <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 46, textAlign: "center" }}>{String(ndClockSec).padStart(2, "0")}</span>
+                    <button onClick={() => setNdClockSec(ndClockSec === 55 ? 0 : ndClockSec + 5)} style={{ ...stepBtn, width: 38, height: 38, fontSize: 20 }}>+</button>
+                  </div>
+                  <span style={{ fontSize: 11, color: "#4a5568", letterSpacing: 1 }}>SEC</span>
+                </div>
+              </div>
+
+              {/* Score */}
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Score at Drive Start</div>
+              <div style={{ display: "flex", gap: 16, marginBottom: 14 }}>
+                {[["Us", ndUsScore, setNdUsScore], ["Them", ndThemScore, setNdThemScore]].map(([lbl, val, setter]) => (
+                  <div key={lbl} style={{ flex: 1, background: "#1d2530", borderRadius: 10, padding: "10px", textAlign: "center" }}>
+                    <div style={{ fontSize: 11, color: "#7a8699", letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }}>{lbl}</div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                      <button onClick={() => setter(Math.max(0, val - 1))} style={{ ...stepBtn, width: 34, height: 34, fontSize: 18 }}>–</button>
+                      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 28, fontWeight: 700, minWidth: 36, textAlign: "center" }}>{val}</span>
+                      <button onClick={() => setter(val + 1)} style={{ ...stepBtn, width: 34, height: 34, fontSize: 18 }}>+</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Field position */}
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Ball Spot</div>
+              {fpDisplayMode === "pm50" ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+                  <button onClick={() => setNdPmValue(Math.max(-49, ndPmValue - 1))} style={stepBtn}>–</button>
+                  <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 60, textAlign: "center" }}>
+                    {ndPmValue === 0 ? "50" : ndPmValue > 0 ? `+${ndPmValue}` : `${ndPmValue}`}
+                  </span>
+                  <button onClick={() => setNdPmValue(Math.min(49, ndPmValue + 1))} style={stepBtn}>+</button>
+                  <span style={{ color: "#7a8699", fontSize: 13 }}>{ndPmValue > 0 ? "opp territory" : ndPmValue < 0 ? "own territory" : "midfield"}</span>
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                    {["own", "50", "opp"].map((t) => (
+                      <button key={t} onClick={() => setNdTerritory(t)} style={{ flex: 1, padding: "12px 0", borderRadius: 8, border: "none", background: ndTerritory === t ? "#f5c518" : "#1d2530", color: ndTerritory === t ? "#0a0e14" : "#a8b3c4", fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>
+                        {t === "own" ? "Own" : t === "50" ? "50" : "Opp"}
+                      </button>
+                    ))}
+                  </div>
+                  {ndTerritory !== "50" && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+                      <button onClick={() => setNdYard(Math.max(1, ndYard - 1))} style={stepBtn}>–</button>
+                      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{ndYard}</span>
+                      <button onClick={() => setNdYard(Math.min(49, ndYard + 1))} style={stepBtn}>+</button>
+                      <span style={{ color: "#7a8699", fontSize: 13 }}>{ndTerritory === "own" ? "own yard line" : "opp yard line"}</span>
+                    </div>
+                  )}
+                </>
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={startNewDrive} style={{ flex: 1, padding: "14px", borderRadius: 10, border: "none", background: "#f5c518", color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>
+                  {ytdg !== null ? `Start Drive ${driveNumber + 1}` : "Set Position"}
+                </button>
+                <button onClick={() => { setShowNewDrive(false); setNeedNewDrive(false); }} style={{ padding: "14px 18px", borderRadius: 10, border: "1px solid #2a3543", background: "none", color: "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 14, cursor: "pointer" }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {/* Penalty panel */}
+          {showPenalty && (
+            <div style={{ background: "#141a24", border: "1px solid #f59e0b", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: "#f59e0b", marginBottom: 12 }}>Flag on the Play</div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Penalty Type</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+                {(playbook.penalties ?? DEFAULT_PLAYBOOK.penalties).map((pt) => (
+                  <Chip key={pt} active={penaltyType === pt} onClick={() => setPenaltyType(penaltyType === pt ? "" : pt)}>{pt}</Chip>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                <button onClick={() => setPenaltyOnUs(true)} style={{ flex: 1, padding: "12px 0", borderRadius: 8, border: "none", background: penaltyOnUs ? "#ff5252" : "#1d2530", color: penaltyOnUs ? "#fff" : "#a8b3c4", fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>On Us</button>
+                <button onClick={() => setPenaltyOnUs(false)} style={{ flex: 1, padding: "12px 0", borderRadius: 8, border: "none", background: !penaltyOnUs ? "#3ddc84" : "#1d2530", color: !penaltyOnUs ? "#0a0e14" : "#a8b3c4", fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>On Them</button>
+              </div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Yards</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+                <button onClick={() => setPenaltyYards(Math.max(1, penaltyYards - 1))} style={stepBtn}>–</button>
+                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{penaltyYards}</span>
+                <button onClick={() => setPenaltyYards(penaltyYards + 1)} style={stepBtn}>+</button>
+              </div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Override</div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                <button onClick={() => { setPenaltyAutoFirst(!penaltyAutoFirst); if (!penaltyAutoFirst) setPenaltyReplay(false); }} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: `1px solid ${penaltyAutoFirst ? "#f5c518" : "#2a3543"}`, background: penaltyAutoFirst ? "#1a1810" : "none", color: penaltyAutoFirst ? "#f5c518" : "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 12, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>Auto 1st Down</button>
+                <button onClick={() => { setPenaltyReplay(!penaltyReplay); if (!penaltyReplay) setPenaltyAutoFirst(false); }} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: `1px solid ${penaltyReplay ? "#f5c518" : "#2a3543"}`, background: penaltyReplay ? "#1a1810" : "none", color: penaltyReplay ? "#f5c518" : "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 12, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>Replay Down</button>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={logPenalty} disabled={!penaltyType} style={{ flex: 1, padding: "14px", borderRadius: 10, border: "none", background: penaltyType ? "#f59e0b" : "#1d2530", color: penaltyType ? "#0a0e14" : "#4a5568", fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", cursor: penaltyType ? "pointer" : "not-allowed" }}>Log Flag</button>
+                <button onClick={() => { setShowPenalty(false); setPenaltyType(""); setPenaltyYards(5); setPenaltyOnUs(true); setPenaltyAutoFirst(false); setPenaltyReplay(false); }} style={{ padding: "14px 18px", borderRadius: 10, border: "1px solid #2a3543", background: "none", color: "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 14, cursor: "pointer" }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {/* Punt panel */}
+          {showPunt && side === "offense" && (
+            <div style={{ background: "#141a24", border: "1px solid #5b8af5", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: "#5b8af5", marginBottom: 12 }}>Punt</div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Punt Distance (yds)</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+                <button onClick={() => setPuntDist(Math.max(0, puntDist - 1))} style={stepBtn}>–</button>
+                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{puntDist}</span>
+                <button onClick={() => setPuntDist(Math.min(80, puntDist + 1))} style={stepBtn}>+</button>
+              </div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Result</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+                {["Returned", "Fair Catch", "Touchback", "Downed", "Out of Bounds", "Blocked", "Fumble-Us", "Fumble-Them"].map(r => (
+                  <Chip key={r} active={puntResult === r} onClick={() => setPuntResult(r)}>{r}</Chip>
+                ))}
+              </div>
+              {["Returned", "Fumble-Us", "Fumble-Them"].includes(puntResult) && (<>
+                <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Return Yards</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+                  <button onClick={() => setPuntReturn(Math.max(-10, puntReturn - 1))} style={stepBtn}>–</button>
+                  <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{puntReturn}</span>
+                  <button onClick={() => setPuntReturn(Math.min(50, puntReturn + 1))} style={stepBtn}>+</button>
+                </div>
+              </>)}
+              {ytdg != null && (() => {
+                const noRet = ["Fair Catch", "Downed", "Out of Bounds"].includes(puntResult);
+                const landing = Math.min(99, ytdg + puntDist);
+                const endAbs = puntResult === "Touchback" ? 80 : puntResult === "Blocked" ? ytdg : noRet ? Math.max(1, Math.min(98, landing)) : Math.max(1, Math.min(99, landing - puntReturn));
+                const net = endAbs - ytdg;
+                return (
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, color: "#a8b3c4", marginBottom: 14 }}>
+                    Net {net >= 0 ? "+" : ""}{net} yds → {ytdgLabel(endAbs, fpDisplayMode)}
+                    {puntResult === "Fumble-Us" && <span style={{ color: "#3ddc84", marginLeft: 8 }}>We recover — keep possession</span>}
+                  </div>
+                );
+              })()}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={logPunt} style={{ flex: 1, padding: "14px", borderRadius: 10, border: "none", background: "#5b8af5", color: "#fff", fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>Log Punt</button>
+                <button onClick={() => { setShowPunt(false); setPuntDist(35); setPuntReturn(0); setPuntResult("Returned"); }} style={{ padding: "14px 18px", borderRadius: 10, border: "1px solid #2a3543", background: "none", color: "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 14, cursor: "pointer" }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {/* End Drive panel */}
+          {showEndDrive && editing && (
+            <div style={{ background: "#141a24", border: "1px solid #ff5252", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: "#ff5252", marginBottom: 12 }}>End Drive {driveNumber}</div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>Outcome</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                {(playbook.driveOutcomes ?? DEFAULT_PLAYBOOK.driveOutcomes).map(o => (
+                  <Chip key={o} active={endDriveOutcome === o} onClick={() => setEndDriveOutcome(endDriveOutcome === o ? "" : o)}>{o}</Chip>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={endDrive} style={{ flex: 1, padding: "14px", borderRadius: 10, border: "none", background: "#ff5252", color: "#fff", fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>End Drive</button>
+                <button onClick={() => { setShowEndDrive(false); setEndDriveOutcome(""); }} style={{ padding: "14px 18px", borderRadius: 10, border: "1px solid #2a3543", background: "none", color: "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 14, cursor: "pointer" }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {editing && !showNewDrive && !showPenalty && !showPunt && !showEndDrive && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              <button onClick={() => setShowPenalty(true)} style={{ padding: "10px 16px", borderRadius: 8, border: "1px solid #f59e0b", background: "none", color: "#f59e0b", fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>🚩 Flag</button>
+              {side === "offense" && <button onClick={() => { setShowPunt(true); setPuntDist(35); setPuntReturn(0); setPuntResult("Returned"); }} style={{ padding: "10px 16px", borderRadius: 8, border: "1px solid #5b8af5", background: "none", color: "#5b8af5", fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>Punt</button>}
+            </div>
+          )}
+
           {editing && side === "offense" && (
             <>
               {sectionOrder.map((key) => {
@@ -1307,8 +2011,8 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                         <span style={{ color: "#7a8699", fontSize: 14, textTransform: "uppercase", letterSpacing: 1 }}>&amp;</span>
                         <button onClick={() => setDistance(Math.max(distance - 1, 1))} style={stepBtn}>–</button>
-                        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{distance}</span>
-                        <button onClick={() => setDistance(distance + 1)} style={stepBtn}>+</button>
+                        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{distance}{ytdg !== null && ((side === "offense" && ytdg >= 90 && distance >= 100 - ytdg) || (side === "defense" && ytdg <= 10 && distance >= ytdg)) ? <span style={{ fontSize: 13, color: "#f5c518", display: "block", letterSpacing: 1 }}>GOAL</span> : null}</span>
+                        <button onClick={() => setDistance(Math.min(distance + 1, ytdgMaxDist(ytdg, side)))} style={stepBtn}>+</button>
                         <span style={{ color: "#7a8699", fontSize: 13 }}>yds to go</span>
                       </div>
                     </Section>
@@ -1350,7 +2054,8 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                           <Chip active={gainType === "INT"} onClick={() => { setGainType("INT"); setIncomplete(true); setYards(""); setCarrier(""); }} big>INT</Chip>
                           <Chip active={gainType === "Fumble"} onClick={() => { setGainType("Fumble"); setIncomplete(false); }} big>Fumble</Chip>
                           <Chip active={gainType === "Safety"} onClick={() => { setGainType("Safety"); setIncomplete(true); setYards(""); setCarrier(""); }} big>Safety</Chip>
-                          <Chip active={gainType === "Sack"} onClick={() => { setGainType("Sack"); setIncomplete(false); }} big>Sack</Chip>
+                          <Chip active={gainType === "Sack"} onClick={() => { setGainType("Sack"); setIncomplete(false); setPlayType("Pass"); setYards("0"); }} big>Sack</Chip>
+                          <Chip active={gainType === "FG"} onClick={() => { setGainType("FG"); setIncomplete(true); setYards(""); setCarrier(""); }} big>FG</Chip>
                         </div>
                         {gainType === "INT" ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INTERCEPTION — 0 yards</div>
                           : gainType === "Safety" ? <div style={{ color: "#ff5252", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>SAFETY — 0 yards</div>
@@ -1450,8 +2155,8 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                         <span style={{ color: "#7a8699", fontSize: 14, textTransform: "uppercase", letterSpacing: 1 }}>&amp;</span>
                         <button onClick={() => setDistance(Math.max(distance - 1, 1))} style={stepBtn}>–</button>
-                        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{distance}</span>
-                        <button onClick={() => setDistance(distance + 1)} style={stepBtn}>+</button>
+                        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, minWidth: 50, textAlign: "center" }}>{distance}{ytdg !== null && ((side === "offense" && ytdg >= 90 && distance >= 100 - ytdg) || (side === "defense" && ytdg <= 10 && distance >= ytdg)) ? <span style={{ fontSize: 13, color: "#f5c518", display: "block", letterSpacing: 1 }}>GOAL</span> : null}</span>
+                        <button onClick={() => setDistance(Math.min(distance + 1, ytdgMaxDist(ytdg, side)))} style={stepBtn}>+</button>
                         <span style={{ color: "#7a8699", fontSize: 13 }}>yds to go</span>
                       </div>
                     </Section>
@@ -1479,7 +2184,7 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                         <Chip active={defGainType === "INT"} onClick={() => { setDefGainType("INT"); setDefIncomplete(true); setDefYards(""); setDefCarrier(""); }} big>INT</Chip>
                         <Chip active={defGainType === "Fumble"} onClick={() => { setDefGainType("Fumble"); setDefIncomplete(false); }} big>Fumble</Chip>
                         <Chip active={defGainType === "Safety"} onClick={() => { setDefGainType("Safety"); setDefIncomplete(true); setDefYards(""); setDefCarrier(""); }} big>Safety</Chip>
-                        <Chip active={defGainType === "Sack"} onClick={() => { setDefGainType("Sack"); setDefIncomplete(false); }} big>Sack</Chip>
+                        <Chip active={defGainType === "Sack"} onClick={() => { setDefGainType("Sack"); setDefIncomplete(false); setDefPlayType("Pass"); setDefYards("0"); }} big>Sack</Chip>
                       </div>
                       {defGainType === "INT" ? <div style={{ color: "#3ddc84", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>INTERCEPTION — turnover!</div>
                         : defGainType === "Safety" ? <div style={{ color: "#3ddc84", fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>SAFETY — 2 points!</div>
@@ -1543,20 +2248,71 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
               <div style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 10 }}>
                 {side === "offense" ? "Offense" : "Defense"} · {activePlays.length} {activePlays.length === 1 ? "play" : "plays"}
               </div>
-              {activePlays.map((p) => {
+              {activePlays.map((p, i) => {
+                const showBanner = i > 0 && p.driveNumber && activePlays[i - 1].driveNumber && p.driveNumber !== activePlays[i - 1].driveNumber;
+                const banner = showBanner ? (() => {
+                  const pd = activePlays[i - 1].driveNumber;
+                  const di = drives.find(d => d.driveNumber === pd);
+                  const oc = di?.outcome ? (["Touchdown", "Field Goal"].includes(di.outcome) ? "#3ddc84" : ["Interception", "Fumble", "Blocked Punt", "Blocked FG", "Safety"].includes(di.outcome) ? "#ff5252" : "#a8b3c4") : null;
+                  return (
+                    <div style={{ borderTop: "1px solid #1d2530", margin: "4px 0 10px", padding: "6px 4px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: "#4a5568" }}>Drive {pd}</span>
+                      {di?.outcome && <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: oc }}>{di.outcome}</span>}
+                    </div>
+                  );
+                })() : null;
+                // Penalty play row
+                if (p.type === "penalty") {
+                  const hasResult = p.newDown != null && p.newDistance != null;
+                  const tag = p.penaltyAutoFirst ? " · Auto 1st" : p.penaltyReplay ? " · Replay" : "";
+                  return (
+                    <React.Fragment key={p.id}>{banner}
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: "3px solid #f59e0b" }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15, color: "#f59e0b" }}>🚩 FLAG · {p.penaltyType} · {p.penaltyOnUs ? "on us" : "on them"}{tag}</div>
+                          <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>
+                            {ordinal(p.down)} &amp; {p.distance}{p.fieldPos != null ? ` · ${fpLabel(p.fieldPos, fpDisplayMode)}` : ""} · {Math.abs(p.yards)} yds
+                            {hasResult && <span style={{ color: "#f5c518", marginLeft: 6 }}>→ {ordinal(p.newDown)} &amp; {p.newDistance}</span>}
+                          </div>
+                        </div>
+                        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, color: "#f59e0b", minWidth: 44, textAlign: "right" }}>
+                          {p.penaltyOnUs ? `−${Math.abs(p.yards)}` : `+${Math.abs(p.yards)}`}
+                        </div>
+                        {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
+                      </div>
+                    </React.Fragment>
+                  );
+                }
+                if (p.type === "punt") {
+                  const detail = p.puntResult === "Touchback" ? "Touchback" : p.puntResult === "Blocked" ? "Blocked" : `${p.puntDist} yd${p.puntReturn > 0 ? `, ${p.puntReturn} return` : ""} → net ${p.puntNet >= 0 ? "+" : ""}${p.puntNet}`;
+                  return (
+                    <React.Fragment key={p.id}>{banner}
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: "3px solid #5b8af5" }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>{ordinal(p.down)} &amp; {p.distance}{p.hash ? ` · ${p.hash}` : ""}{p.fieldPos != null ? ` · ${fpLabel(p.fieldPos, fpDisplayMode)}` : ""}{p.driveNumber ? ` · Drive ${p.driveNumber}` : ""}</div>
+                          <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>PUNT · {detail}</div>
+                        </div>
+                        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, minWidth: 44, textAlign: "right", color: "#5b8af5" }}>PUNT</div>
+                        {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
+                      </div>
+                    </React.Fragment>
+                  );
+                }
                 if (side === "offense") {
                   const col = p.gainType === "TD" ? "#3ddc84" : (p.incomplete || p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Sack") ? "#ff5252" : p.yards >= p.distance ? "#3ddc84" : p.yards < 0 ? "#ff5252" : "#f5c518";
                   return (
-                    <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${col}` }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>{ordinal(p.down)} &amp; {p.distance} · {p.hash} · {p.personnel} {p.formation}{p.formTags?.length ? ` ${p.formTags.join(" ")}` : ""}</div>
-                        <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{(p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play}{p.rpoTags?.length ? ` · ${p.rpoTags.join("/")}${p.rpoPlayer ? " (" + p.rpoPlayer + ")" : ""}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.passer ? ` · QB #${p.passer}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{p.gainType === "Fumble" ? ` · frc ${p.fumbleForcer || "—"}${p.fumbleRecovery ? " · " + p.fumbleRecovery.toLowerCase() + " rec" : ""}` : ""}{p.gainType === "INT" ? ` · int ${p.intBy || "—"}${p.intReturn ? " · " + p.intReturn + " yd ret" : ""}` : ""}{p.gainType !== "INT" && p.gainType !== "Fumble" ? ` · tkl ${p.tackler}` : ""}</div>
+                    <React.Fragment key={p.id}>{banner}
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${col}` }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>{ordinal(p.down)} &amp; {p.distance} · {p.hash}{p.fieldPos != null ? ` · ${fpLabel(p.fieldPos, fpDisplayMode)}` : ""}{p.driveNumber ? ` · Drive ${p.driveNumber}` : ""}</div>
+                          <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>{p.personnel} {p.formation}{p.formTags?.length ? ` ${p.formTags.join(" ")}` : ""} · {(p.runCarrier && p.playType === "Run") ? `${p.runCarrier} ${p.play}` : p.play}{p.rpoTags?.length ? ` · ${p.rpoTags.join("/")}${p.rpoPlayer ? " (" + p.rpoPlayer + ")" : ""}` : ""}{p.motion !== "None" ? ` · ${p.motionPlayer ? p.motionPlayer + " " : ""}${p.motion}` : ""}{p.passer ? ` · QB #${p.passer}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{p.gainType === "Fumble" ? ` · frc ${p.fumbleForcer || "—"}${p.fumbleRecovery ? " · " + p.fumbleRecovery.toLowerCase() + " rec" : ""}` : ""}{p.gainType === "INT" ? ` · int ${p.intBy || "—"}${p.intReturn ? " · " + p.intReturn + " yd ret" : ""}` : ""}{p.gainType !== "INT" && p.gainType !== "Fumble" ? ` · tkl ${p.tackler}` : ""}</div>
+                        </div>
+                        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, minWidth: 44, textAlign: "right", color: col }}>
+                          {p.gainType === "INT" ? "INT" : p.gainType === "Safety" ? "SAF" : p.gainType === "TD" ? "TD" : p.gainType === "FG" ? "FG" : p.gainType === "Sack" ? "SCK" : p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}
+                        </div>
+                        {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
                       </div>
-                      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, minWidth: 44, textAlign: "right", color: col }}>
-                        {p.gainType === "INT" ? "INT" : p.gainType === "Safety" ? "SAF" : p.gainType === "TD" ? "TD" : p.gainType === "Sack" ? "SCK" : p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}
-                      </div>
-                      {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
-                    </div>
+                    </React.Fragment>
                   );
                 } else {
                   const col = p.gainType === "INT" || p.gainType === "Safety" || p.gainType === "Fumble" ? "#3ddc84"
@@ -1564,20 +2320,22 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                     : p.incomplete ? "#3ddc84"
                     : p.yards >= p.distance ? "#ff5252" : p.yards < 0 ? "#3ddc84" : "#f5c518";
                   return (
-                    <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${col}` }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>
-                          {ordinal(p.down)} &amp; {p.distance} · {p.hash}{p.fieldBdry ? ` · ${p.fieldBdry}` : ""} · {p.oppPersonnel} {p.oppFormation}{p.oppFormTags?.length ? ` ${p.oppFormTags.join(" ")}` : ""}
+                    <React.Fragment key={p.id}>{banner}
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, borderLeft: `3px solid ${col}` }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15 }}>
+                            {ordinal(p.down)} &amp; {p.distance} · {p.hash}{p.fieldBdry ? ` · ${p.fieldBdry}` : ""}{p.fieldPos != null ? ` · ${fpLabel(p.fieldPos, fpDisplayMode)}` : ""}{p.driveNumber ? ` · Drive ${p.driveNumber}` : ""}
+                          </div>
+                          <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>
+                            {p.oppPersonnel} {p.oppFormation} · {p.play}{p.oppMotion !== "None" ? ` · ${p.oppMotionPlayer ? p.oppMotionPlayer + " " : ""}${p.oppMotion}` : ""}{p.front ? ` · ${p.front}` : ""}{p.coverage ? `/${p.coverage}` : ""}{p.blitz && p.blitz !== "None" ? `/${p.blitz}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{` · tkl ${p.tackler}`}
+                          </div>
                         </div>
-                        <div style={{ fontSize: 13, color: "#a8b3c4", marginTop: 2 }}>
-                          {p.play}{p.oppMotion !== "None" ? ` · ${p.oppMotionPlayer ? p.oppMotionPlayer + " " : ""}${p.oppMotion}` : ""}{p.front ? ` · ${p.front}` : ""}{p.coverage ? `/${p.coverage}` : ""}{p.blitz && p.blitz !== "None" ? `/${p.blitz}` : ""}{p.carrier ? ` · #${p.carrier}` : ""}{` · tkl ${p.tackler}`}
+                        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, minWidth: 44, textAlign: "right", color: col }}>
+                          {p.gainType === "INT" ? "INT" : p.gainType === "Safety" ? "SAF" : p.gainType === "TD" ? "TD" : p.gainType === "Sack" ? "SCK" : p.gainType === "Fumble" ? "FUM" : p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}
                         </div>
+                        {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
                       </div>
-                      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, minWidth: 44, textAlign: "right", color: col }}>
-                        {p.gainType === "INT" ? "INT" : p.gainType === "Safety" ? "SAF" : p.gainType === "TD" ? "TD" : p.gainType === "Sack" ? "SCK" : p.gainType === "Fumble" ? "FUM" : p.incomplete ? "INC" : `${p.yards > 0 ? "+" : ""}${p.yards}`}
-                      </div>
-                      {editing && <button onClick={() => deletePlay(p.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>}
-                    </div>
+                    </React.Fragment>
                   );
                 }
               })}
@@ -1589,22 +2347,30 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
 
       {tab === "tendencies" && (
         <div style={{ padding: 16 }}>
-          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <button onClick={() => setTendSide("offense")} style={modeBtn(tendSide === "offense", true)}>Offense</button>
             <button onClick={() => setTendSide("defense")} style={modeBtn(tendSide === "defense")}>Defense</button>
           </div>
-          {tendSide === "offense" ? (
+          <div style={{ display: "flex", gap: 0, marginBottom: 16, borderBottom: "1px solid #1d2530" }}>
+            {[["stats", "Stats"], ["situations", "Situations"]].map(([k, l]) => (
+              <button key={k} onClick={() => setTendSubTab(k)} style={{ flex: 1, padding: "10px", background: "transparent", color: tendSubTab === k ? "#f5c518" : "#7a8699", border: "none", borderBottom: tendSubTab === k ? "2px solid #f5c518" : "2px solid transparent", fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>{l}</button>
+            ))}
+          </div>
+          {tendSubTab === "situations" ? (
+            <SituationsTab plays={tendSide === "offense" ? offPlays : defPlays} drives={drives} side={tendSide} fpDisplayMode={fpDisplayMode} driveOutcomes={playbook.driveOutcomes ?? DEFAULT_PLAYBOOK.driveOutcomes} />
+          ) : tendSide === "offense" ? (
             offPlays.length === 0 ? <div style={{ textAlign: "center", color: "#4a5568", padding: "60px 20px", fontSize: 15 }}>No offensive plays logged yet.</div> : (() => {
-              const rushPlays = offPlays.filter(p => p.playType === "Run" || p.gainType === "Sack");
+              const rushPlays = offPlays.filter(p => p.gainType !== "Sack" && p.playType === "Run");
               const rushYards = rushPlays.reduce((s, p) => s + p.yards, 0);
               const rushTDs = offPlays.filter(p => p.gainType === "TD" && p.playType === "Run").length;
-              const passPlays = offPlays.filter(p => p.playType === "Pass" && p.gainType !== "Sack");
+              const passPlays = offPlays.filter(p => p.gainType !== "Sack" && p.playType === "Pass");
               const passComp = passPlays.filter(p => !p.incomplete && p.gainType !== "INT").length;
               const passYards = passPlays.filter(p => !p.incomplete && p.gainType !== "INT").reduce((s, p) => s + p.yards, 0);
               const passTDs = offPlays.filter(p => p.gainType === "TD" && p.playType === "Pass").length;
               const ints = offPlays.filter(p => p.gainType === "INT").length;
               const fumbles = offPlays.filter(p => p.gainType === "Fumble").length;
               const sacks = offPlays.filter(p => p.gainType === "Sack").length;
+              const sackYards = offPlays.filter(p => p.gainType === "Sack").reduce((s, p) => s + p.yards, 0);
               const safeties = offPlays.filter(p => p.gainType === "Safety").length;
               const qbStats = {};
               offPlays.filter(p => p.playType === "Pass" && p.passer && p.gainType !== "Sack").forEach(p => {
@@ -1622,9 +2388,10 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                 <>
                   <div style={{ background: "#11161f", border: "1px solid #1d2530", borderRadius: 12, padding: "14px 16px", marginBottom: 20 }}>
                     <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#f5c518", marginBottom: 10 }}>Offense · Box Score</div>
-                    {bsRow("Total", `${offPlays.length} plays · ${rushYards + passYards >= 0 ? "+" : ""}${rushYards + passYards} yds`)}
-                    {bsRow("Rush", `${rushPlays.length} att · ${rushYards >= 0 ? "+" : ""}${rushYards} yds${rushTDs ? ` · ${rushTDs} TD` : ""}${sacks ? ` · ${sacks} sack${sacks > 1 ? "s" : ""}` : ""}`)}
+                    {bsRow("Total", `${offPlays.length} plays · ${rushYards + passYards + sackYards >= 0 ? "+" : ""}${rushYards + passYards + sackYards} yds`)}
+                    {bsRow("Rush", `${rushPlays.length} att · ${rushYards >= 0 ? "+" : ""}${rushYards} yds${rushTDs ? ` · ${rushTDs} TD` : ""}`)}
                     {bsRow("Pass", `${passComp}/${passPlays.length} · ${passYards >= 0 ? "+" : ""}${passYards} yds${passTDs ? ` · ${passTDs} TD` : ""}${ints ? ` · ${ints} INT` : ""}`)}
+                    {sacks > 0 && bsRow("Sacks", `${sacks} for ${sackYards} yds`)}
                     {Object.entries(qbStats).map(([num, s]) => bsRow(`QB #${num}`, `${s.comp}/${s.att} · ${s.yards >= 0 ? "+" : ""}${s.yards} yds${s.tds ? " · " + s.tds + " TD" : ""}${s.ints ? " · " + s.ints + " INT" : ""}`))}
                     {(fumbles > 0 || safeties > 0) && bsRow("Turnovers", `${fumbles ? fumbles + " fumble" + (fumbles > 1 ? "s" : "") : ""}${fumbles && safeties ? " · " : ""}${safeties ? safeties + " safety" : ""}`)}
                   </div>
@@ -1638,16 +2405,20 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                   <Breakdown title="By Hash" data={tendencies.byHash} total={offPlays.length} />
                   <Breakdown title="By Down" data={tendencies.byDown} total={offPlays.length} keyFmt={ordinal} />
                   <CarrierBreakdown data={tendencies.byCarrier} />
+                  <DriveBreakdown plays={offPlays} drives={drives} />
+                  <PuntBreakdown plays={offPlays} />
+                  <DriveOutcomeBreakdown drives={drives} plays={offPlays} />
                 </>
               );
             })()
           ) : (
             defPlays.length === 0 ? <div style={{ textAlign: "center", color: "#4a5568", padding: "60px 20px", fontSize: 15 }}>No defensive plays logged yet.</div> : (() => {
               const dt = defTendencies;
-              const runPlays = defPlays.filter(p => p.playType === "Run" || p.gainType === "Sack");
+              const runPlays = defPlays.filter(p => p.gainType !== "Sack" && p.playType === "Run");
               const runYards = runPlays.reduce((s, p) => s + p.yards, 0);
               const runTDs = defPlays.filter(p => p.gainType === "TD" && p.playType === "Run").length;
-              const passPl = defPlays.filter(p => p.playType === "Pass" && p.gainType !== "Sack");
+              const passPl = defPlays.filter(p => p.gainType !== "Sack" && p.playType === "Pass");
+              const sackYards = defPlays.filter(p => p.gainType === "Sack").reduce((s, p) => s + p.yards, 0);
               const passComp = passPl.filter(p => !p.incomplete && p.gainType !== "INT").length;
               const passYards = passPl.filter(p => !p.incomplete && p.gainType !== "INT").reduce((s, p) => s + p.yards, 0);
               const passTDs = defPlays.filter(p => p.gainType === "TD" && p.playType === "Pass").length;
@@ -1667,7 +2438,7 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                     {bsRow("Total Plays", `${defPlays.length} · ${dt.totalYards} yds allowed · ${dt.avg} avg`)}
                     {bsRow("Rush Def", `${runPlays.length} att · ${runYards} yds${runTDs ? ` · ${runTDs} TD allowed` : ""}`)}
                     {bsRow("Pass Def", `${passComp}/${passPl.length} · ${passYards} yds${passTDs ? ` · ${passTDs} TD allowed` : ""}`)}
-                    {(turnovers > 0 || safeties > 0 || sacks > 0) && bsRow("Takeaways / Big Plays", [turnovers ? `${turnovers} TO` : "", safeties ? `${safeties} safety` : "", sacks ? `${sacks} sack${sacks > 1 ? "s" : ""}` : ""].filter(Boolean).join(" · "))}
+                    {(turnovers > 0 || safeties > 0 || sacks > 0) && bsRow("Takeaways / Big Plays", [turnovers ? `${turnovers} TO` : "", safeties ? `${safeties} safety` : "", sacks > 0 ? `${sacks} sack${sacks > 1 ? "s" : ""}${sackYards < 0 ? " (" + sackYards + " yds)" : ""}` : ""].filter(Boolean).join(" · "))}
                   </div>
                   <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
                     <Stat label="Plays" value={defPlays.length} /><Stat label="Yds Allowed" value={dt.totalYards} /><Stat label="Yds / Play" value={dt.avg} accent />
@@ -1682,10 +2453,38 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
                   <Breakdown title="By Our Coverage" data={dt.byCoverage} total={defPlays.length} />
                   {Object.keys(dt.byBlitz).some(k => k !== "None" && k !== "—") && <Breakdown title="By Blitz Tag" data={Object.fromEntries(Object.entries(dt.byBlitz).filter(([k]) => k !== "None" && k !== "—"))} total={defPlays.length} />}
                   <CarrierBreakdown data={dt.byCarrier} />
+                  <DriveBreakdown plays={defPlays} drives={drives} />
+                  <DriveOutcomeBreakdown drives={drives} plays={defPlays} />
                 </>
               );
             })()
           )}
+        </div>
+      )}
+
+      {tab === "reports" && (
+        <div style={{ padding: 16 }}>
+          {[
+            { key: "onepager", title: "Postgame One-Pager", desc: "Header, score by quarter, game stats, drive summary, top performers, what worked." },
+            { key: "selfscout", title: "Self-Scout Tendency Report", desc: "Down & distance, field zone, formation, personnel, hash tendencies. Multi-game aggregation." },
+          ].map(({ key, title, desc }) => (
+            <div key={key} style={{ background: "#11161f", borderRadius: 12, padding: 16, marginBottom: 12, border: "1px solid #1d2530" }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{title}</div>
+              <div style={{ fontSize: 13, color: "#a8b3c4", marginBottom: 14, lineHeight: 1.5 }}>{desc}</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setReportView(key)} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "none", background: "#f5c518", color: "#0a0e14", fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer" }}>View</button>
+                <button onClick={async () => {
+                  setPdfExporting(true);
+                  if (key === "onepager") {
+                    await exportOnePagerPDF(computeOnePager(offPlays, defPlays, drives, usScore, themScore), label, gameDate, usScore, themScore);
+                  } else {
+                    await exportSelfScoutPDF(computeSelfScout(offPlays), label, playbook.teamName || "Our Offense", gameDate);
+                  }
+                  setPdfExporting(false);
+                }} disabled={pdfExporting} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "1px solid #2a3543", background: "transparent", color: pdfExporting ? "#4a5568" : "#c4cdda", fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", cursor: pdfExporting ? "not-allowed" : "pointer" }}>{pdfExporting ? "Exporting…" : "↓ PDF"}</button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -1701,6 +2500,29 @@ function Game({ id, label, playbook, layout, isHeadCoach, onBack }) {
             fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase",
             cursor: (offPlays.length || defPlays.length) ? "pointer" : "not-allowed",
           }}>↓ Download Spreadsheet (CSV)</button>
+        </div>
+      )}
+      {reportView === "onepager" && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 300, background: "#fff", overflowY: "auto" }}>
+          <OnePagerView
+            data={computeOnePager(offPlays, defPlays, drives, usScore, themScore)}
+            label={label} gameDate={gameDate} usScore={usScore} themScore={themScore}
+            onClose={() => setReportView(null)}
+            onExportPDF={async () => { setPdfExporting(true); await exportOnePagerPDF(computeOnePager(offPlays, defPlays, drives, usScore, themScore), label, gameDate, usScore, themScore); setPdfExporting(false); }}
+            pdfExporting={pdfExporting}
+          />
+        </div>
+      )}
+      {reportView === "selfscout" && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 300, background: "#fff", overflowY: "auto" }}>
+          <SelfScoutView
+            currentGameId={id} currentOffPlays={offPlays}
+            label={label} gameDate={gameDate}
+            onClose={() => setReportView(null)}
+            onExportPDF={async () => { setPdfExporting(true); await exportSelfScoutPDF(computeSelfScout(offPlays), label, playbook.teamName || "Our Offense", gameDate); setPdfExporting(false); }}
+            pdfExporting={pdfExporting}
+            teamName={playbook.teamName || "Our Offense"}
+          />
         </div>
       )}
     </Shell>
@@ -1777,6 +2599,1030 @@ function Breakdown({ title, data, total, keyFmt = (x) => x }) {
     })}
   </div>);
 }
+function DriveBreakdown({ plays, drives }) {
+  const driveMap = {};
+  (drives || []).forEach(d => { driveMap[d.driveNumber] = d; });
+  const byDrive = {};
+  plays.forEach((p) => {
+    if (!p.driveNumber || p.type === "penalty" || p.type === "punt") return;
+    const d = p.driveNumber;
+    byDrive[d] ??= { count: 0, yards: 0, result: null };
+    byDrive[d].count++;
+    byDrive[d].yards += p.yards || 0;
+    if (!byDrive[d].result) {
+      if (p.gainType === "TD") byDrive[d].result = "TD";
+      else if (p.gainType === "Safety") byDrive[d].result = "Safety";
+      else if (p.gainType === "INT") byDrive[d].result = "INT";
+      else if (p.gainType === "Fumble") byDrive[d].result = "Fumble";
+    }
+  });
+  // Prefer the tagged outcome over the play-derived fallback
+  Object.keys(byDrive).forEach(dNum => {
+    if (driveMap[dNum]?.outcome) byDrive[dNum].result = driveMap[dNum].outcome;
+  });
+  const rows = Object.entries(byDrive).sort((a, b) => Number(a[0]) - Number(b[0]));
+  if (rows.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 26 }}>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 12 }}>By Drive</div>
+      <div style={{ display: "flex", padding: "0 4px 8px", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", borderBottom: "1px solid #1d2530", marginBottom: 10 }}>
+        <span style={{ width: 60 }}>Drive</span>
+        <span style={{ width: 50, textAlign: "right" }}>Plays</span>
+        <span style={{ flex: 1, textAlign: "right" }}>Yards</span>
+        <span style={{ width: 50, textAlign: "right" }}>Avg</span>
+        <span style={{ width: 70, textAlign: "right" }}>Result</span>
+      </div>
+      {rows.map(([d, v]) => {
+        const avg = v.count ? (v.yards / v.count).toFixed(1) : "0.0";
+        const resultColor = ["TD", "Touchdown", "Field Goal"].includes(v.result) ? "#3ddc84"
+          : ["INT", "Interception", "Fumble", "Blocked Punt", "Blocked FG"].includes(v.result) ? "#ff5252"
+          : v.result === "Safety" ? "#f5c518"
+          : "#a8b3c4";
+        return (
+          <div key={d} style={{ display: "flex", alignItems: "center", padding: "8px 4px", borderBottom: "1px solid #1d2530" }}>
+            <span style={{ width: 60, fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16 }}>#{d}</span>
+            <span style={{ width: 50, textAlign: "right", color: "#a8b3c4", fontSize: 14 }}>{v.count}</span>
+            <span style={{ flex: 1, textAlign: "right", fontFamily: FONT_DISPLAY, fontWeight: 700, color: "#f5c518" }}>{v.yards >= 0 ? "+" : ""}{v.yards}</span>
+            <span style={{ width: 50, textAlign: "right", color: "#a8b3c4", fontSize: 13 }}>{avg}</span>
+            <span style={{ width: 70, textAlign: "right", fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 12, color: resultColor }}>{v.result || "—"}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DriveOutcomeBreakdown({ drives, plays }) {
+  const relevantNums = new Set((plays || []).filter(p => p.driveNumber).map(p => p.driveNumber));
+  const relevant = (drives || []).filter(d => relevantNums.has(d.driveNumber));
+  const withOutcome = relevant.filter(d => d.outcome);
+  if (withOutcome.length === 0) return null;
+  const total = relevant.length;
+  const counts = {};
+  withOutcome.forEach(d => { counts[d.outcome] = (counts[d.outcome] || 0) + 1; });
+  const scoringCount = (counts["Touchdown"] || 0) + (counts["Field Goal"] || 0);
+  const scoringRate = total > 0 ? Math.round(scoringCount / total * 100) : 0;
+  const rows = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const bsRow = (lbl, val, col) => (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #1d2530" }}>
+      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 1, textTransform: "uppercase", color: "#7a8699" }}>{lbl}</span>
+      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, color: col || "#f4f4f0" }}>{val}</span>
+    </div>
+  );
+  return (
+    <div style={{ marginBottom: 26 }}>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 12 }}>Drive Outcomes</div>
+      <div style={{ background: "#11161f", border: "1px solid #1d2530", borderRadius: 12, padding: "14px 16px" }}>
+        {bsRow("Scoring Rate", `${scoringCount} / ${total} drives (${scoringRate}%)`, scoringRate >= 50 ? "#3ddc84" : scoringRate >= 30 ? "#f5c518" : "#f4f4f0")}
+        {rows.map(([outcome, count]) => {
+          const col = ["Touchdown", "Field Goal"].includes(outcome) ? "#3ddc84"
+            : ["Interception", "Fumble", "Blocked Punt", "Blocked FG", "Safety"].includes(outcome) ? "#ff5252"
+            : "#f4f4f0";
+          return bsRow(outcome, count, col);
+        })}
+      </div>
+    </div>
+  );
+}
+
+// =================== REPORTS ===================
+
+function computeOnePager(offPlays, defPlays, drives, usScore, themScore) {
+  const sorted = [...drives].sort((a, b) => a.driveNumber - b.driveNumber);
+  const off = offPlays.filter(p => p.type !== "penalty" && p.type !== "punt");
+  const def = defPlays.filter(p => p.type !== "penalty" && p.type !== "punt");
+
+  function scoreAfterQ(q) {
+    const nxt = sorted.find(d => d.quarter > q);
+    return nxt ? { us: nxt.usScore, them: nxt.themScore } : { us: usScore, them: themScore };
+  }
+  const qScores = [1, 2, 3, 4].map(q => {
+    const end = scoreAfterQ(q);
+    const prev = q === 1 ? { us: 0, them: 0 } : scoreAfterQ(q - 1);
+    return { us: end.us - prev.us, them: end.them - prev.them };
+  });
+
+  const offYards = off.reduce((s, p) => s + (p.yards || 0), 0);
+  const defYards = def.reduce((s, p) => s + (p.yards || 0), 0);
+  const offYPP = off.length ? (offYards / off.length).toFixed(1) : "—";
+  const defYPP = def.length ? (defYards / def.length).toFixed(1) : "—";
+
+  const off3A = off.filter(p => p.down === 3);
+  const off3C = off3A.filter(p => ["INT", "Fumble", "Sack"].indexOf(p.gainType) === -1 && (p.yards || 0) >= (p.distance || 1));
+  const def3A = def.filter(p => p.down === 3);
+  const def3C = def3A.filter(p => ["INT", "Fumble", "Sack"].indexOf(p.gainType) === -1 && (p.yards || 0) >= (p.distance || 1));
+
+  const offRZNums = new Set(off.filter(p => (p.fieldPos || 0) >= 80 && p.driveNumber).map(p => p.driveNumber));
+  const offRZTDs = sorted.filter(d => offRZNums.has(d.driveNumber) && d.outcome === "Touchdown").length;
+  const defRZNums = new Set(def.filter(p => (p.fieldPos || 0) >= 80 && p.driveNumber).map(p => p.driveNumber));
+  const defRZTDs = def.filter(p => (p.fieldPos || 0) >= 80 && p.gainType === "TD").length;
+
+  const offINTs = off.filter(p => p.gainType === "INT").length;
+  const offFumbles = off.filter(p => p.gainType === "Fumble").length;
+  const defINTs = def.filter(p => p.gainType === "INT").length;
+  const defFumbles = def.filter(p => p.gainType === "Fumble").length;
+
+  const offPens = offPlays.filter(p => p.type === "penalty");
+  const defPens = defPlays.filter(p => p.type === "penalty");
+  const offPenYards = Math.abs(offPens.reduce((s, p) => s + (p.yards || 0), 0));
+  const defPenYards = Math.abs(defPens.reduce((s, p) => s + (p.yards || 0), 0));
+
+  const offSacks = off.filter(p => p.gainType === "Sack").length;
+  const defSacks = def.filter(p => p.gainType === "Sack").length;
+
+  const driveSummary = sorted.map(d => {
+    const dPlays = off.filter(p => p.driveNumber === d.driveNumber);
+    const allDP = offPlays.filter(p => p.driveNumber === d.driveNumber && p.type !== "penalty");
+    const yards = dPlays.reduce((s, p) => s + (p.yards || 0), 0);
+    const startPos = allDP.length > 0 ? allDP[allDP.length - 1].fieldPos : null;
+    return { num: d.driveNumber, startPos, plays: allDP.length, yards, outcome: d.outcome || null };
+  }).filter(d => d.plays > 0);
+
+  const cMap = {};
+  off.filter(p => p.carrier && !p.incomplete && p.gainType !== "INT").forEach(p => {
+    (cMap[p.carrier] ??= { yards: 0, count: 0 }); cMap[p.carrier].yards += p.yards || 0; cMap[p.carrier].count++;
+  });
+  const topCarriers = Object.entries(cMap).sort((a, b) => b[1].yards - a[1].yards).slice(0, 3)
+    .map(([k, v]) => ({ num: k, yards: v.yards, count: v.count, avg: (v.yards / v.count).toFixed(1) }));
+
+  const tMap = {};
+  def.filter(p => p.tacklerNum).forEach(p => {
+    (tMap[p.tacklerNum] ??= { count: 0, pos: "" }); tMap[p.tacklerNum].count++;
+    if (p.tacklerPos && !tMap[p.tacklerNum].pos) tMap[p.tacklerNum].pos = p.tacklerPos;
+  });
+  const topTacklers = Object.entries(tMap).sort((a, b) => b[1].count - a[1].count).slice(0, 3)
+    .map(([k, v]) => ({ num: k, count: v.count, pos: v.pos }));
+
+  const pMap = {};
+  off.filter(p => p.play && !p.incomplete && p.gainType !== "INT" && p.gainType !== "Fumble").forEach(p => {
+    (pMap[p.play] ??= { yards: 0, count: 0 }); pMap[p.play].yards += p.yards || 0; pMap[p.play].count++;
+  });
+  const qual = Object.entries(pMap).filter(([, v]) => v.count >= 3).map(([k, v]) => ({ play: k, avg: v.yards / v.count, count: v.count }));
+  const whatWorked = [...qual].sort((a, b) => b.avg - a.avg).slice(0, 3);
+  const whatDidnt = [...qual].sort((a, b) => a.avg - b.avg).slice(0, 3);
+
+  const result = usScore > themScore ? "W" : usScore < themScore ? "L" : "T";
+  return {
+    qScores, result, offTotal: off.length, defTotal: def.length,
+    offYards, defYards, offYPP, defYPP,
+    off3A: off3A.length, off3C: off3C.length, def3A: def3A.length, def3C: def3C.length,
+    offRZTrips: offRZNums.size, offRZTDs, defRZTrips: defRZNums.size, defRZTDs,
+    offINTs, offFumbles, defINTs, defFumbles,
+    offPens: offPens.length, offPenYards, defPens: defPens.length, defPenYards,
+    offSacks, defSacks, driveSummary, topCarriers, topTacklers, whatWorked, whatDidnt,
+  };
+}
+
+function computeSelfScout(offPlays) {
+  const plays = offPlays.filter(p => p.type !== "penalty" && p.type !== "punt");
+  const total = plays.length;
+  const runs = plays.filter(p => p.playType === "Run");
+  const passes = plays.filter(p => p.playType === "Pass");
+  const totalYards = plays.reduce((s, p) => s + (p.yards || 0), 0);
+  const ypp = total ? (totalYards / total).toFixed(1) : "—";
+  const runPct = total ? Math.round(runs.length / total * 100) : 0;
+
+  function bStats(bp) {
+    const r = bp.filter(p => p.playType === "Run"), pa = bp.filter(p => p.playType === "Pass");
+    const y = bp.reduce((s, p) => s + (p.yards || 0), 0);
+    const pf = {};
+    bp.forEach(p => { if (p.play) pf[p.play] = (pf[p.play] || 0) + 1; });
+    const topPlay = Object.entries(pf).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
+    return { count: bp.length, runPct: Math.round(r.length / bp.length * 100), passPct: Math.round(pa.length / bp.length * 100), avg: (y / bp.length).toFixed(1), topPlay };
+  }
+
+  function ddBucket(p) {
+    const d = p.down, dist = p.distance;
+    if (d === 1) return "1st & 10";
+    if (d === 2 && dist <= 3) return "2nd & Short (1-3)";
+    if (d === 2 && dist <= 6) return "2nd & Med (4-6)";
+    if (d === 2) return "2nd & Long (7+)";
+    if (d === 3 && dist <= 3) return "3rd & Short (1-3)";
+    if (d === 3 && dist <= 6) return "3rd & Med (4-6)";
+    if (d === 3) return "3rd & Long (7+)";
+    if (d === 4) return "4th Down";
+    return null;
+  }
+  const ddOrder = ["1st & 10", "2nd & Short (1-3)", "2nd & Med (4-6)", "2nd & Long (7+)", "3rd & Short (1-3)", "3rd & Med (4-6)", "3rd & Long (7+)", "4th Down"];
+  const ddB = {};
+  plays.forEach(p => { const b = ddBucket(p); if (b) (ddB[b] ??= []).push(p); });
+  const ddRows = ddOrder.map(b => ddB[b]?.length ? { label: b, ...bStats(ddB[b]) } : null).filter(Boolean);
+
+  function fzBucket(fp) {
+    if (fp == null) return null;
+    if (fp <= 20) return "Backed Up (Own 1-20)";
+    if (fp <= 79) return "Normal (Own 21–Opp 21)";
+    if (fp <= 96) return "Red Zone (Opp 20-4)";
+    return "Goal Line (Opp 3-1)";
+  }
+  const fzOrder = ["Backed Up (Own 1-20)", "Normal (Own 21–Opp 21)", "Red Zone (Opp 20-4)", "Goal Line (Opp 3-1)"];
+  const fzB = {};
+  plays.forEach(p => { const b = fzBucket(p.fieldPos); if (b) (fzB[b] ??= []).push(p); });
+  const fzRows = fzOrder.map(b => fzB[b]?.length ? { label: b, ...bStats(fzB[b]) } : null).filter(Boolean);
+
+  const hashB = {};
+  plays.forEach(p => { (hashB[p.hash || "—"] ??= []).push(p); });
+  const hashRows = Object.entries(hashB).sort((a, b) => b[1].length - a[1].length).map(([h, bp]) => ({ hash: h, ...bStats(bp) }));
+
+  function groupTend(keyFn) {
+    const m = {};
+    plays.forEach(p => { const k = keyFn(p) || "—"; (m[k] ??= []).push(p); });
+    return Object.entries(m).sort((a, b) => b[1].length - a[1].length).map(([k, bp]) => {
+      const pf = {};
+      bp.forEach(p => { if (p.play) pf[p.play] = (pf[p.play] || 0) + 1; });
+      const top3 = Object.entries(pf).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([pl, c]) => `${pl} (${c})`).join(", ");
+      return { label: k, pct: Math.round(bp.length / total * 100), top3, ...bStats(bp) };
+    });
+  }
+
+  const personnelRows = groupTend(p => p.personnel);
+  const formationRows = groupTend(p => p.formation);
+
+  const pf = {};
+  plays.forEach(p => {
+    if (!p.play) return;
+    (pf[p.play] ??= { count: 0, yards: 0, type: p.playType });
+    pf[p.play].count++; pf[p.play].yards += p.yards || 0;
+    if (!pf[p.play].type && p.playType) pf[p.play].type = p.playType;
+  });
+  const topPlays = Object.entries(pf).sort((a, b) => b[1].count - a[1].count).slice(0, 10)
+    .map(([k, v]) => ({ play: k, count: v.count, avg: (v.yards / v.count).toFixed(1), type: v.type || "—", pct: Math.round(v.count / total * 100) }));
+
+  const cMap = {};
+  plays.filter(p => p.carrier && !p.incomplete && p.gainType !== "INT").forEach(p => {
+    (cMap[p.carrier] ??= { count: 0, yards: 0, longest: 0 });
+    cMap[p.carrier].count++; cMap[p.carrier].yards += p.yards || 0;
+    if ((p.yards || 0) > cMap[p.carrier].longest) cMap[p.carrier].longest = p.yards;
+  });
+  const topCarriers = Object.entries(cMap).sort((a, b) => b[1].yards - a[1].yards).slice(0, 8)
+    .map(([k, v]) => ({ num: k, count: v.count, yards: v.yards, avg: (v.yards / v.count).toFixed(1), longest: v.longest }));
+
+  return { total, runCount: runs.length, passCount: passes.length, runPct, passPct: 100 - runPct, ypp, totalYards, ddRows, fzRows, hashRows, personnelRows, formationRows, topPlays, topCarriers };
+}
+
+async function exportOnePagerPDF(data, label, gameDate, usScore, themScore) {
+  try {
+    const { Document, Page, View, Text, StyleSheet, pdf } = await import("@react-pdf/renderer");
+    const e = React.createElement;
+    const S = StyleSheet.create({
+      page: { padding: 36, fontFamily: "Helvetica", fontSize: 10, color: "#111" },
+      secHdr: { fontSize: 8, fontFamily: "Helvetica-Bold", textTransform: "uppercase", color: "#1a3a5c", borderBottomWidth: 1.5, borderBottomColor: "#1a3a5c", paddingBottom: 2, marginTop: 14, marginBottom: 6 },
+      row: { flexDirection: "row" },
+      thCell: { padding: "3 5", fontSize: 7, fontFamily: "Helvetica-Bold", color: "#fff", backgroundColor: "#1a3a5c", flex: 1 },
+      tdCell: { padding: "3 5", fontSize: 8, borderBottomWidth: 0.5, borderBottomColor: "#e5e7eb", flex: 1 },
+      label: { flex: 2 },
+    });
+
+    function t(style, text) { return e(Text, { style }, String(text ?? "")); }
+    function v(style, ...children) { return e(View, { style }, ...children); }
+    function secH(text) { return t(S.secHdr, text); }
+    function tRow(cells, isHeader) {
+      return v(S.row, ...cells.map((cell, i) =>
+        e(Text, { style: isHeader ? S.thCell : S.tdCell, key: i }, String(cell ?? ""))
+      ));
+    }
+
+    const { qScores, result, offTotal, defTotal, offYards, defYards, offYPP, defYPP, off3A, off3C, def3A, def3C, offRZTrips, offRZTDs, defRZTrips, defRZTDs, offINTs, offFumbles, defINTs, defFumbles, offPens, offPenYards, defPens, defPenYards, offSacks, defSacks, driveSummary, topCarriers, topTacklers, whatWorked, whatDidnt } = data;
+    const fpL = (pos) => { if (pos == null) return "—"; if (pos === 50) return "50"; if (pos < 50) return `Own ${pos}`; return `Opp ${100 - pos}`; };
+    const fmtDate = gameDate ? new Date(gameDate).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+
+    const doc = e(Document, null,
+      e(Page, { size: "LETTER", style: S.page },
+        // Header
+        v({ flexDirection: "row", justifyContent: "space-between", borderBottomWidth: 2, borderBottomColor: "#1a3a5c", paddingBottom: 10, marginBottom: 12 },
+          v({},
+            t({ fontSize: 16, fontFamily: "Helvetica-Bold", textTransform: "uppercase" }, label),
+            t({ fontSize: 8, color: "#6b7280", marginTop: 2 }, fmtDate)
+          ),
+          v({ alignItems: "flex-end" },
+            t({ fontSize: 22, fontFamily: "Helvetica-Bold" }, `${usScore} – ${themScore}`),
+            t({ fontSize: 9, fontFamily: "Helvetica-Bold", color: result === "W" ? "#155724" : result === "L" ? "#7f1d1d" : "#374151" },
+              result === "W" ? "WIN" : result === "L" ? "LOSS" : "TIE")
+          )
+        ),
+        // Score by Quarter
+        secH("Score by Quarter"),
+        tRow(["", "Q1", "Q2", "Q3", "Q4", "Final"], true),
+        tRow(["Us", ...qScores.map(q => q.us), usScore]),
+        tRow(["Them", ...qScores.map(q => q.them), themScore]),
+        // Stats
+        secH("Game Stats"),
+        tRow(["Stat", "Us", "Them"], true),
+        tRow(["Total Plays", offTotal, defTotal]),
+        tRow(["Total Yards", offYards, defYards]),
+        tRow(["Yards / Play", offYPP, defYPP]),
+        tRow(["3rd Down", `${off3C}/${off3A} (${off3A ? Math.round(off3C / off3A * 100) : 0}%)`, `${def3C}/${def3A} (${def3A ? Math.round(def3C / def3A * 100) : 0}%)`]),
+        tRow(["Red Zone (TD/Trips)", `${offRZTDs}/${offRZTrips}`, `${defRZTDs}/${defRZTrips}`]),
+        tRow(["Turnovers", `${offINTs + offFumbles} (${offINTs} INT, ${offFumbles} Fum)`, `${defINTs + defFumbles} (${defINTs} INT, ${defFumbles} Fum)`]),
+        tRow(["Sacks", offSacks, defSacks]),
+        tRow(["Penalties (Yds)", `${offPens} (${offPenYards} yds)`, `${defPens} (${defPenYards} yds)`]),
+        // Drive Summary
+        driveSummary.length > 0 ? v({},
+          secH("Drive Summary"),
+          tRow(["#", "Start", "Plays", "Yards", "Outcome"], true),
+          ...driveSummary.map(d => tRow([d.num, fpL(d.startPos), d.plays, `${d.yards >= 0 ? "+" : ""}${d.yards}`, d.outcome || "—"]))
+        ) : null,
+        // Top Performers
+        (topCarriers.length > 0 || topTacklers.length > 0) ? v({},
+          secH("Top Performers"),
+          topCarriers.length > 0 ? v({},
+            t({ fontSize: 8, fontFamily: "Helvetica-Bold", marginBottom: 3, color: "#1a3a5c" }, "Ball Carriers"),
+            tRow(["#", "Carries", "Yards", "Avg"], true),
+            ...topCarriers.map(c => tRow([`#${c.num}`, c.count, c.yards, c.avg]))
+          ) : null,
+          topTacklers.length > 0 ? v({ marginTop: 6 },
+            t({ fontSize: 8, fontFamily: "Helvetica-Bold", marginBottom: 3, color: "#1a3a5c" }, "Tacklers"),
+            tRow(["Player", "Tackles"], true),
+            ...topTacklers.map(tk => tRow([tk.pos ? `${tk.pos} #${tk.num}` : `#${tk.num}`, tk.count]))
+          ) : null
+        ) : null,
+        // What Worked / What Didn't
+        (whatWorked.length > 0 || whatDidnt.length > 0) ? v({},
+          secH("What Worked / What Didn't (min 3 att)"),
+          v({ flexDirection: "row", gap: 10 },
+            whatWorked.length > 0 ? v({ flex: 1 },
+              t({ fontSize: 8, fontFamily: "Helvetica-Bold", color: "#155724", marginBottom: 3 }, "What Worked"),
+              tRow(["Play", "Att", "Avg"], true),
+              ...whatWorked.map(w => tRow([w.play, w.count, w.avg.toFixed(1)]))
+            ) : null,
+            whatDidnt.length > 0 ? v({ flex: 1 },
+              t({ fontSize: 8, fontFamily: "Helvetica-Bold", color: "#7f1d1d", marginBottom: 3 }, "What Didn't"),
+              tRow(["Play", "Att", "Avg"], true),
+              ...whatDidnt.map(w => tRow([w.play, w.count, w.avg.toFixed(1)]))
+            ) : null
+          )
+        ) : null
+      )
+    );
+
+    const blob = await pdf(doc).toBlob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `OnePager_${label.replace(/[/\\:*?"<>|]/g, "_")}.pdf`; a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error("PDF export failed:", err);
+    alert("PDF export failed — check browser console.");
+  }
+}
+
+async function exportSelfScoutPDF(data, label, teamName, gameDate) {
+  try {
+    const { Document, Page, View, Text, StyleSheet, pdf } = await import("@react-pdf/renderer");
+    const e = React.createElement;
+    const S = StyleSheet.create({
+      page: { padding: 36, fontFamily: "Helvetica", fontSize: 10, color: "#111" },
+      secHdr: { fontSize: 8, fontFamily: "Helvetica-Bold", textTransform: "uppercase", color: "#1a3a5c", borderBottomWidth: 1.5, borderBottomColor: "#1a3a5c", paddingBottom: 2, marginTop: 14, marginBottom: 6 },
+      row: { flexDirection: "row" },
+      thCell: { padding: "3 4", fontSize: 7, fontFamily: "Helvetica-Bold", color: "#fff", backgroundColor: "#1a3a5c", flex: 1 },
+      thCellW: { padding: "3 4", fontSize: 7, fontFamily: "Helvetica-Bold", color: "#fff", backgroundColor: "#1a3a5c", flex: 2 },
+      tdCell: { padding: "3 4", fontSize: 8, borderBottomWidth: 0.5, borderBottomColor: "#e5e7eb", flex: 1 },
+      tdCellW: { padding: "3 4", fontSize: 8, borderBottomWidth: 0.5, borderBottomColor: "#e5e7eb", flex: 2 },
+      tdCellL: { padding: "3 4", fontSize: 8, borderBottomWidth: 0.5, borderBottomColor: "#e5e7eb", flex: 3 },
+    });
+
+    function t(style, text) { return e(Text, { style }, String(text ?? "")); }
+    function v(style, ...children) { return e(View, { style }, ...children); }
+    function secH(text) { return t(S.secHdr, text); }
+
+    function tendTable(rows, wideFirst) {
+      return v({},
+        v(S.row,
+          e(Text, { style: wideFirst ? S.thCellW : S.thCell }, "Group"),
+          e(Text, { style: S.thCell }, "Plays %"),
+          e(Text, { style: S.thCell }, "Run%"),
+          e(Text, { style: S.thCell }, "Pass%"),
+          e(Text, { style: S.thCell }, "Avg"),
+          e(Text, { style: S.tdCellL, key: "tp" }, "Top Plays")
+        ),
+        ...rows.map(r => v({ ...S.row, key: r.label },
+          e(Text, { style: wideFirst ? S.tdCellW : S.tdCell }, r.label),
+          e(Text, { style: S.tdCell }, `${r.count} (${r.pct}%)`),
+          e(Text, { style: S.tdCell }, `${r.runPct}%`),
+          e(Text, { style: S.tdCell }, `${r.passPct}%`),
+          e(Text, { style: S.tdCell }, r.avg),
+          e(Text, { style: S.tdCellL }, r.top3 || "—")
+        ))
+      );
+    }
+
+    const fmtDate = gameDate ? new Date(gameDate).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+    const { total, runCount, passCount, runPct, passPct, ypp, ddRows, fzRows, hashRows, personnelRows, formationRows, topPlays, topCarriers } = data;
+
+    const doc = e(Document, null,
+      e(Page, { size: "LETTER", style: S.page },
+        v({ flexDirection: "row", justifyContent: "space-between", borderBottomWidth: 2, borderBottomColor: "#1a3a5c", paddingBottom: 10, marginBottom: 12 },
+          v({},
+            t({ fontSize: 14, fontFamily: "Helvetica-Bold", textTransform: "uppercase" }, `Self-Scout: ${teamName}`),
+            t({ fontSize: 8, color: "#6b7280", marginTop: 2 }, `${label} · ${fmtDate}`)
+          ),
+          v({ alignItems: "flex-end" },
+            t({ fontSize: 11, fontFamily: "Helvetica-Bold" }, `${total} plays`),
+            t({ fontSize: 9, color: "#374151" }, `${runCount} run (${runPct}%) / ${passCount} pass (${passPct}%)`),
+            t({ fontSize: 9, color: "#374151" }, `${ypp} yds/play`)
+          )
+        ),
+        ddRows.length > 0 ? v({},
+          secH("Down & Distance Tendencies"),
+          v(S.row,
+            e(Text, { style: S.thCellW }, "Situation"),
+            e(Text, { style: S.thCell }, "Plays"),
+            e(Text, { style: S.thCell }, "Run%"),
+            e(Text, { style: S.thCell }, "Pass%"),
+            e(Text, { style: S.thCell }, "Avg"),
+            e(Text, { style: S.thCellW }, "Top Play")
+          ),
+          ...ddRows.map(r => v({ ...S.row, key: r.label },
+            e(Text, { style: S.tdCellW }, r.label),
+            e(Text, { style: S.tdCell }, r.count),
+            e(Text, { style: S.tdCell }, `${r.runPct}%`),
+            e(Text, { style: S.tdCell }, `${r.passPct}%`),
+            e(Text, { style: S.tdCell }, r.avg),
+            e(Text, { style: S.tdCellW }, r.topPlay)
+          ))
+        ) : null,
+        fzRows.length > 0 ? v({},
+          secH("Field Zone Tendencies"),
+          v(S.row,
+            e(Text, { style: S.thCellW }, "Zone"),
+            e(Text, { style: S.thCell }, "Plays"),
+            e(Text, { style: S.thCell }, "Run%"),
+            e(Text, { style: S.thCell }, "Pass%"),
+            e(Text, { style: S.thCell }, "Avg"),
+            e(Text, { style: S.thCellW }, "Top Play")
+          ),
+          ...fzRows.map(r => v({ ...S.row, key: r.label },
+            e(Text, { style: S.tdCellW }, r.label),
+            e(Text, { style: S.tdCell }, r.count),
+            e(Text, { style: S.tdCell }, `${r.runPct}%`),
+            e(Text, { style: S.tdCell }, `${r.passPct}%`),
+            e(Text, { style: S.tdCell }, r.avg),
+            e(Text, { style: S.tdCellW }, r.topPlay)
+          ))
+        ) : null
+      ),
+      e(Page, { size: "LETTER", style: S.page },
+        personnelRows.length > 0 ? v({}, secH("Personnel Tendencies"), tendTable(personnelRows, true)) : null,
+        formationRows.length > 0 ? v({}, secH("Formation Tendencies"), tendTable(formationRows, false)) : null,
+        topPlays.length > 0 ? v({},
+          secH("Top Plays by Frequency"),
+          v(S.row,
+            e(Text, { style: S.thCellW }, "Play"),
+            e(Text, { style: S.thCell }, "Type"),
+            e(Text, { style: S.thCell }, "Count %"),
+            e(Text, { style: S.thCell }, "Avg")
+          ),
+          ...topPlays.map(r => v({ ...S.row, key: r.play },
+            e(Text, { style: S.tdCellW }, r.play),
+            e(Text, { style: S.tdCell }, r.type),
+            e(Text, { style: S.tdCell }, `${r.count} (${r.pct}%)`),
+            e(Text, { style: S.tdCell }, r.avg)
+          ))
+        ) : null,
+        topCarriers.length > 0 ? v({},
+          secH("Ball Carriers"),
+          v(S.row,
+            e(Text, { style: S.thCell }, "#"),
+            e(Text, { style: S.thCell }, "Touches"),
+            e(Text, { style: S.thCell }, "Yards"),
+            e(Text, { style: S.thCell }, "Avg"),
+            e(Text, { style: S.thCell }, "Long")
+          ),
+          ...topCarriers.map(c => v({ ...S.row, key: c.num },
+            e(Text, { style: S.tdCell }, `#${c.num}`),
+            e(Text, { style: S.tdCell }, c.count),
+            e(Text, { style: S.tdCell }, c.yards),
+            e(Text, { style: S.tdCell }, c.avg),
+            e(Text, { style: S.tdCell }, c.longest)
+          ))
+        ) : null,
+        hashRows.length > 0 ? v({},
+          secH("Hash Tendencies"),
+          v(S.row,
+            e(Text, { style: S.thCell }, "Hash"),
+            e(Text, { style: S.thCell }, "Plays"),
+            e(Text, { style: S.thCell }, "Run%"),
+            e(Text, { style: S.thCell }, "Pass%"),
+            e(Text, { style: S.thCell }, "Avg")
+          ),
+          ...hashRows.map(r => v({ ...S.row, key: r.hash },
+            e(Text, { style: S.tdCell }, r.hash),
+            e(Text, { style: S.tdCell }, r.count),
+            e(Text, { style: S.tdCell }, `${r.runPct}%`),
+            e(Text, { style: S.tdCell }, `${r.passPct}%`),
+            e(Text, { style: S.tdCell }, r.avg)
+          ))
+        ) : null
+      )
+    );
+
+    const blob = await pdf(doc).toBlob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `SelfScout_${label.replace(/[/\\:*?"<>|]/g, "_")}.pdf`; a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error("Self-Scout PDF export failed:", err);
+    alert("PDF export failed — check browser console.");
+  }
+}
+
+function OnePagerView({ data, label, gameDate, usScore, themScore, onClose, onExportPDF, pdfExporting }) {
+  const { qScores, result, offTotal, defTotal, offYards, defYards, offYPP, defYPP, off3A, off3C, def3A, def3C, offRZTrips, offRZTDs, defRZTrips, defRZTDs, offINTs, offFumbles, defINTs, defFumbles, offPens, offPenYards, defPens, defPenYards, offSacks, defSacks, driveSummary, topCarriers, topTacklers, whatWorked, whatDidnt } = data;
+  const fmtDate = gameDate ? new Date(gameDate).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+  const D = { background: "#fff", color: "#111", fontFamily: "'Georgia', serif" };
+  const SH = { fontFamily: "'Arial Narrow', sans-serif", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "#1a3a5c", borderBottom: "2px solid #1a3a5c", paddingBottom: 4, marginBottom: 10, marginTop: 20 };
+  const TBL = { width: "100%", borderCollapse: "collapse", fontSize: 13 };
+  const TH = { padding: "6px 8px", textAlign: "left", background: "#1a3a5c", color: "#fff", fontFamily: "'Arial Narrow', sans-serif", fontWeight: 700, fontSize: 11, textTransform: "uppercase" };
+  const THC = { ...TH, textAlign: "center" };
+  const TD = { padding: "5px 8px", borderBottom: "1px solid #e5e7eb", fontSize: 13 };
+  const TDC = { ...TD, textAlign: "center" };
+  const TDLBL = { ...TD, fontFamily: "'Arial Narrow', sans-serif", fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.3, color: "#374151" };
+
+  function outcomeStyle(oc) {
+    if (!oc) return {};
+    if (oc === "Touchdown") return { background: "#d4edda", color: "#155724", borderRadius: 3, padding: "1px 6px", fontSize: 11, fontFamily: "'Arial Narrow', sans-serif", fontWeight: 700 };
+    if (oc === "Field Goal") return { background: "#fff3cd", color: "#856404", borderRadius: 3, padding: "1px 6px", fontSize: 11, fontFamily: "'Arial Narrow', sans-serif", fontWeight: 700 };
+    if (["Interception", "Fumble", "Blocked Punt", "Blocked FG", "Safety"].includes(oc)) return { background: "#f8d7da", color: "#7f1d1d", borderRadius: 3, padding: "1px 6px", fontSize: 11, fontFamily: "'Arial Narrow', sans-serif", fontWeight: 700 };
+    return { background: "#f3f4f6", color: "#374151", borderRadius: 3, padding: "1px 6px", fontSize: 11, fontFamily: "'Arial Narrow', sans-serif" };
+  }
+  function fpL(pos) { if (pos == null) return "—"; if (pos === 50) return "50"; if (pos < 50) return `Own ${pos}`; return `Opp ${100 - pos}`; }
+
+  return (
+    <div style={D}>
+      <div style={{ background: "#1a3a5c", padding: "10px 16px", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, zIndex: 10 }}>
+        <button onClick={onClose} style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 6, color: "#fff", padding: "6px 12px", cursor: "pointer", fontSize: 13, fontFamily: FONT_BODY }}>‹ Back</button>
+        <span style={{ flex: 1, color: "#fff", fontFamily: FONT_DISPLAY, fontSize: 16, letterSpacing: 1 }}>Postgame One-Pager</span>
+        <button onClick={onExportPDF} disabled={pdfExporting} style={{ background: pdfExporting ? "#4a6585" : "#fff", border: "none", borderRadius: 6, color: pdfExporting ? "#ccc" : "#1a3a5c", padding: "7px 14px", cursor: pdfExporting ? "not-allowed" : "pointer", fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 700, letterSpacing: 0.5 }}>{pdfExporting ? "Exporting…" : "↓ Export PDF"}</button>
+      </div>
+      <div style={{ padding: "20px 16px", maxWidth: 720, margin: "0 auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, paddingBottom: 14, borderBottom: "2px solid #1a3a5c" }}>
+          <div>
+            <div style={{ fontFamily: "'Arial Narrow', sans-serif", fontSize: 22, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
+            {fmtDate && <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{fmtDate}</div>}
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontFamily: "'Arial Narrow', sans-serif", fontSize: 28, fontWeight: 700 }}>{usScore} – {themScore}</div>
+            <span style={{ display: "inline-block", background: result === "W" ? "#d4edda" : result === "L" ? "#f8d7da" : "#e9ecef", color: result === "W" ? "#155724" : result === "L" ? "#7f1d1d" : "#374151", borderRadius: 4, padding: "2px 10px", fontSize: 13, fontWeight: 700, fontFamily: "'Arial Narrow', sans-serif", letterSpacing: 1 }}>{result === "W" ? "WIN" : result === "L" ? "LOSS" : "TIE"}</span>
+          </div>
+        </div>
+
+        <div style={SH}>Score by Quarter</div>
+        <table style={TBL}><thead><tr>
+          <th style={TH}></th>
+          {[1,2,3,4].map(q => <th key={q} style={THC}>Q{q}</th>)}
+          <th style={{ ...THC, background: "#0f2540" }}>Final</th>
+        </tr></thead><tbody>
+          {[["Us", usScore], ["Them", themScore]].map(([lbl, final]) => (
+            <tr key={lbl}>
+              <td style={{ ...TD, fontWeight: 700, fontFamily: "'Arial Narrow', sans-serif", textTransform: "uppercase", fontSize: 11 }}>{lbl}</td>
+              {qScores.map((q, i) => <td key={i} style={TDC}>{lbl === "Us" ? q.us : q.them}</td>)}
+              <td style={{ ...TDC, fontWeight: 700, background: "#f3f4f6" }}>{final}</td>
+            </tr>
+          ))}
+        </tbody></table>
+
+        <div style={SH}>Game Stats</div>
+        <table style={TBL}><thead><tr><th style={TH}>Stat</th><th style={THC}>Us</th><th style={THC}>Them</th></tr></thead><tbody>
+          {[
+            ["Total Plays", offTotal, defTotal],
+            ["Total Yards", offYards, defYards],
+            ["Yards / Play", offYPP, defYPP],
+            ["3rd Down", `${off3C}/${off3A} (${off3A ? Math.round(off3C/off3A*100) : 0}%)`, `${def3C}/${def3A} (${def3A ? Math.round(def3C/def3A*100) : 0}%)`],
+            ["Red Zone (TD/Trips)", `${offRZTDs}/${offRZTrips}`, `${defRZTDs}/${defRZTrips}`],
+            ["Turnovers", `${offINTs + offFumbles} (${offINTs} INT, ${offFumbles} Fum)`, `${defINTs + defFumbles} (${defINTs} INT, ${defFumbles} Fum)`],
+            ["Sacks", offSacks, defSacks],
+            ["Penalties (Yds)", `${offPens} (${offPenYards} yds)`, `${defPens} (${defPenYards} yds)`],
+          ].map(([stat, us, them]) => (
+            <tr key={stat}><td style={TDLBL}>{stat}</td><td style={TDC}>{us}</td><td style={TDC}>{them}</td></tr>
+          ))}
+        </tbody></table>
+
+        {driveSummary.length > 0 && (<>
+          <div style={SH}>Drive Summary</div>
+          <table style={TBL}><thead><tr>
+            <th style={THC}>#</th><th style={TH}>Start</th><th style={THC}>Plays</th><th style={THC}>Yards</th><th style={TH}>Outcome</th>
+          </tr></thead><tbody>
+            {driveSummary.map(d => (
+              <tr key={d.num}>
+                <td style={{ ...TDC, fontWeight: 700 }}>{d.num}</td>
+                <td style={TD}>{fpL(d.startPos)}</td>
+                <td style={TDC}>{d.plays}</td>
+                <td style={TDC}>{d.yards >= 0 ? "+" : ""}{d.yards}</td>
+                <td style={TD}>{d.outcome ? <span style={outcomeStyle(d.outcome)}>{d.outcome}</span> : "—"}</td>
+              </tr>
+            ))}
+          </tbody></table>
+        </>)}
+
+        {(topCarriers.length > 0 || topTacklers.length > 0) && (<>
+          <div style={SH}>Top Performers</div>
+          <div style={{ display: "grid", gridTemplateColumns: topCarriers.length > 0 && topTacklers.length > 0 ? "1fr 1fr" : "1fr", gap: 16 }}>
+            {topCarriers.length > 0 && (
+              <div>
+                <div style={{ fontFamily: "'Arial Narrow', sans-serif", fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#1a3a5c", marginBottom: 6 }}>Offense — Ball Carriers</div>
+                <table style={TBL}><thead><tr><th style={TH}>#</th><th style={THC}>Car</th><th style={THC}>Yds</th><th style={THC}>Avg</th></tr></thead>
+                  <tbody>{topCarriers.map(c => (<tr key={c.num}><td style={TD}>#{c.num}</td><td style={TDC}>{c.count}</td><td style={TDC}>{c.yards}</td><td style={TDC}>{c.avg}</td></tr>))}</tbody>
+                </table>
+              </div>
+            )}
+            {topTacklers.length > 0 && (
+              <div>
+                <div style={{ fontFamily: "'Arial Narrow', sans-serif", fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#1a3a5c", marginBottom: 6 }}>Defense — Tackles</div>
+                <table style={TBL}><thead><tr><th style={TH}>Player</th><th style={THC}>Tkl</th></tr></thead>
+                  <tbody>{topTacklers.map(t => (<tr key={t.num}><td style={TD}>{t.pos ? `${t.pos} #${t.num}` : `#${t.num}`}</td><td style={TDC}>{t.count}</td></tr>))}</tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>)}
+
+        {(whatWorked.length > 0 || whatDidnt.length > 0) && (<>
+          <div style={SH}>What Worked / What Didn't (min 3 att)</div>
+          <div style={{ display: "grid", gridTemplateColumns: whatWorked.length > 0 && whatDidnt.length > 0 ? "1fr 1fr" : "1fr", gap: 16 }}>
+            {whatWorked.length > 0 && (
+              <div>
+                <div style={{ fontFamily: "'Arial Narrow', sans-serif", fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#155724", marginBottom: 6 }}>What Worked</div>
+                <table style={TBL}><thead><tr><th style={TH}>Play</th><th style={THC}>Att</th><th style={THC}>Avg</th></tr></thead>
+                  <tbody>{whatWorked.map(w => (<tr key={w.play}><td style={TD}>{w.play}</td><td style={TDC}>{w.count}</td><td style={{ ...TDC, color: "#155724", fontWeight: 700 }}>{w.avg.toFixed(1)}</td></tr>))}</tbody>
+                </table>
+              </div>
+            )}
+            {whatDidnt.length > 0 && (
+              <div>
+                <div style={{ fontFamily: "'Arial Narrow', sans-serif", fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#7f1d1d", marginBottom: 6 }}>What Didn't</div>
+                <table style={TBL}><thead><tr><th style={TH}>Play</th><th style={THC}>Att</th><th style={THC}>Avg</th></tr></thead>
+                  <tbody>{whatDidnt.map(w => (<tr key={w.play}><td style={TD}>{w.play}</td><td style={TDC}>{w.count}</td><td style={{ ...TDC, color: "#7f1d1d", fontWeight: 700 }}>{w.avg.toFixed(1)}</td></tr>))}</tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>)}
+        <div style={{ height: 40 }} />
+      </div>
+    </div>
+  );
+}
+
+function SelfScoutView({ currentGameId, currentOffPlays, label, gameDate, onClose, onExportPDF, pdfExporting, teamName }) {
+  const [allGames, setAllGames] = useState(null);
+  const [selectedIds, setSelectedIds] = useState(() => new Set([currentGameId]));
+  const [extraPlays, setExtraPlays] = useState({});
+  const [loadingGames, setLoadingGames] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
+
+  useEffect(() => {
+    supabase.from("games").select("id, label, created_at").order("created_at", { ascending: false })
+      .then(({ data }) => setAllGames(data || []));
+  }, []);
+
+  useEffect(() => {
+    const toFetch = [...selectedIds].filter(gid => gid !== currentGameId && !extraPlays[gid]);
+    if (!toFetch.length) return;
+    setLoadingGames(true);
+    supabase.from("games").select("id, offensive_plays").in("id", toFetch)
+      .then(({ data }) => {
+        if (data) setExtraPlays(prev => { const n = { ...prev }; data.forEach(g => { n[g.id] = g.offensive_plays || []; }); return n; });
+        setLoadingGames(false);
+      });
+  }, [selectedIds]);
+
+  const allOffPlays = useMemo(() => {
+    let plays = selectedIds.has(currentGameId) ? [...currentOffPlays] : [];
+    selectedIds.forEach(gid => { if (gid !== currentGameId && extraPlays[gid]) plays = [...plays, ...extraPlays[gid]]; });
+    return plays;
+  }, [selectedIds, currentOffPlays, extraPlays, currentGameId]);
+
+  const scout = useMemo(() => computeSelfScout(allOffPlays), [allOffPlays]);
+  const fmtDate = gameDate ? new Date(gameDate).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+  const selCount = selectedIds.size;
+  const pickerLabel = selCount === 1 && selectedIds.has(currentGameId) ? `${label} only` : `${selCount} game${selCount === 1 ? "" : "s"} selected`;
+
+  const D = { background: "#fff", color: "#111", fontFamily: "'Georgia', serif" };
+  const SH = { fontFamily: "'Arial Narrow', sans-serif", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "#1a3a5c", borderBottom: "2px solid #1a3a5c", paddingBottom: 4, marginBottom: 10, marginTop: 20 };
+  const TBL = { width: "100%", borderCollapse: "collapse", fontSize: 12 };
+  const TH = { padding: "5px 6px", textAlign: "left", background: "#1a3a5c", color: "#fff", fontFamily: "'Arial Narrow', sans-serif", fontWeight: 700, fontSize: 10, textTransform: "uppercase" };
+  const THC = { ...TH, textAlign: "center" };
+  const TD = { padding: "4px 6px", borderBottom: "1px solid #e5e7eb", fontSize: 12 };
+  const TDC = { ...TD, textAlign: "center" };
+
+  function TendTable({ title, rows }) {
+    if (!rows.length) return null;
+    return (<>
+      <div style={SH}>{title}</div>
+      <table style={TBL}><thead><tr>
+        <th style={TH}>Group</th><th style={THC}>Plays (%)</th><th style={THC}>Run%</th><th style={THC}>Pass%</th><th style={THC}>Avg</th><th style={TH}>Top Plays</th>
+      </tr></thead><tbody>
+        {rows.map(r => (<tr key={r.label}>
+          <td style={{ ...TD, fontWeight: 600 }}>{r.label}</td>
+          <td style={TDC}>{r.count} ({r.pct}%)</td>
+          <td style={TDC}>{r.runPct}%</td><td style={TDC}>{r.passPct}%</td><td style={TDC}>{r.avg}</td>
+          <td style={{ ...TD, fontSize: 11, color: "#374151" }}>{r.top3 || "—"}</td>
+        </tr>))}
+      </tbody></table>
+    </>);
+  }
+
+  return (
+    <div style={D}>
+      <div style={{ background: "#1a3a5c", padding: "10px 16px", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, zIndex: 10 }}>
+        <button onClick={onClose} style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 6, color: "#fff", padding: "6px 12px", cursor: "pointer", fontSize: 13, fontFamily: FONT_BODY }}>‹ Back</button>
+        <span style={{ flex: 1, color: "#fff", fontFamily: FONT_DISPLAY, fontSize: 16, letterSpacing: 1 }}>Self-Scout Tendency Report</span>
+        <button onClick={onExportPDF} disabled={pdfExporting} style={{ background: pdfExporting ? "#4a6585" : "#fff", border: "none", borderRadius: 6, color: pdfExporting ? "#ccc" : "#1a3a5c", padding: "7px 14px", cursor: pdfExporting ? "not-allowed" : "pointer", fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 700 }}>{pdfExporting ? "Exporting…" : "↓ Export PDF"}</button>
+      </div>
+      <div style={{ padding: "20px 16px", maxWidth: 720, margin: "0 auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12, paddingBottom: 12, borderBottom: "2px solid #1a3a5c" }}>
+          <div>
+            <div style={{ fontFamily: "'Arial Narrow', sans-serif", fontSize: 22, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>Self-Scout: {teamName}</div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{selCount === 1 && selectedIds.has(currentGameId) ? `${label} · ${fmtDate}` : `${selCount} games selected`}</div>
+          </div>
+          <button onClick={() => setShowPicker(!showPicker)} style={{ border: "1px solid #d1d5db", borderRadius: 6, background: "#f9fafb", color: "#374151", padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: FONT_BODY }}>
+            {showPicker ? "▲" : "▼"} {pickerLabel}
+          </button>
+        </div>
+
+        {showPicker && allGames && (
+          <div style={{ background: "#f9fafb", border: "1px solid #d1d5db", borderRadius: 8, padding: 12, marginBottom: 16 }}>
+            <div style={{ fontFamily: "'Arial Narrow', sans-serif", fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "#6b7280", marginBottom: 8 }}>Select Games to Include</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto" }}>
+              {allGames.map(g => {
+                const checked = selectedIds.has(g.id);
+                return (
+                  <label key={g.id} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", padding: "4px 0" }}>
+                    <input type="checkbox" checked={checked} onChange={() => {
+                      setSelectedIds(prev => {
+                        const next = new Set(prev);
+                        if (checked && next.size > 1) next.delete(g.id); else if (!checked) next.add(g.id);
+                        return next.size === 0 ? new Set([currentGameId]) : next;
+                      });
+                    }} />
+                    <span style={{ fontSize: 13, fontFamily: FONT_BODY }}>{g.label}</span>
+                    <span style={{ fontSize: 11, color: "#6b7280" }}>{new Date(g.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</span>
+                  </label>
+                );
+              })}
+            </div>
+            {loadingGames && <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>Loading plays…</div>}
+          </div>
+        )}
+
+        {scout.total === 0 ? (
+          <div style={{ textAlign: "center", padding: "40px 0", color: "#9ca3af", fontSize: 14 }}>No offensive plays in selected games.</div>
+        ) : (<>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
+            {[["Total Plays", scout.total], ["Run / Pass", `${scout.runCount} / ${scout.passCount}`], ["Run%", `${scout.runPct}%`], ["Yds / Play", scout.ypp]].map(([l, v]) => (
+              <div key={l} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "10px", textAlign: "center" }}>
+                <div style={{ fontFamily: "'Arial Narrow', sans-serif", fontSize: 18, fontWeight: 700 }}>{v}</div>
+                <div style={{ fontSize: 10, fontFamily: "'Arial Narrow', sans-serif", textTransform: "uppercase", color: "#6b7280", marginTop: 2 }}>{l}</div>
+              </div>
+            ))}
+          </div>
+
+          {scout.ddRows.length > 0 && (<>
+            <div style={SH}>Down & Distance Tendencies</div>
+            <table style={TBL}><thead><tr>
+              <th style={TH}>Situation</th><th style={THC}>Plays</th><th style={THC}>Run%</th><th style={THC}>Pass%</th><th style={THC}>Avg</th><th style={TH}>Top Play</th>
+            </tr></thead><tbody>
+              {scout.ddRows.map(r => (<tr key={r.label}>
+                <td style={{ ...TD, fontWeight: 600 }}>{r.label}</td><td style={TDC}>{r.count}</td>
+                <td style={TDC}>{r.runPct}%</td><td style={TDC}>{r.passPct}%</td><td style={TDC}>{r.avg}</td>
+                <td style={{ ...TD, fontSize: 11 }}>{r.topPlay}</td>
+              </tr>))}
+            </tbody></table>
+          </>)}
+
+          {scout.fzRows.length > 0 && (<>
+            <div style={SH}>Field Zone Tendencies</div>
+            <table style={TBL}><thead><tr>
+              <th style={TH}>Zone</th><th style={THC}>Plays</th><th style={THC}>Run%</th><th style={THC}>Pass%</th><th style={THC}>Avg</th><th style={TH}>Top Play</th>
+            </tr></thead><tbody>
+              {scout.fzRows.map(r => (<tr key={r.label}>
+                <td style={{ ...TD, fontWeight: 600 }}>{r.label}</td><td style={TDC}>{r.count}</td>
+                <td style={TDC}>{r.runPct}%</td><td style={TDC}>{r.passPct}%</td><td style={TDC}>{r.avg}</td>
+                <td style={{ ...TD, fontSize: 11 }}>{r.topPlay}</td>
+              </tr>))}
+            </tbody></table>
+          </>)}
+
+          {scout.hashRows.length > 0 && (<>
+            <div style={SH}>Hash Tendencies</div>
+            <table style={TBL}><thead><tr>
+              <th style={TH}>Hash</th><th style={THC}>Plays</th><th style={THC}>Run%</th><th style={THC}>Pass%</th><th style={THC}>Avg</th>
+            </tr></thead><tbody>
+              {scout.hashRows.map(r => (<tr key={r.hash}>
+                <td style={{ ...TD, fontWeight: 600 }}>{r.hash}</td><td style={TDC}>{r.count}</td>
+                <td style={TDC}>{r.runPct}%</td><td style={TDC}>{r.passPct}%</td><td style={TDC}>{r.avg}</td>
+              </tr>))}
+            </tbody></table>
+          </>)}
+
+          <TendTable title="Personnel Tendencies" rows={scout.personnelRows} />
+          <TendTable title="Formation Tendencies" rows={scout.formationRows} />
+
+          {scout.topPlays.length > 0 && (<>
+            <div style={SH}>Top Plays by Frequency</div>
+            <table style={TBL}><thead><tr>
+              <th style={TH}>Play</th><th style={THC}>Type</th><th style={THC}>Count (%)</th><th style={THC}>Avg</th>
+            </tr></thead><tbody>
+              {scout.topPlays.map(r => (<tr key={r.play}>
+                <td style={{ ...TD, fontWeight: 600 }}>{r.play}</td><td style={TDC}>{r.type}</td>
+                <td style={TDC}>{r.count} ({r.pct}%)</td><td style={TDC}>{r.avg}</td>
+              </tr>))}
+            </tbody></table>
+          </>)}
+
+          {scout.topCarriers.length > 0 && (<>
+            <div style={SH}>Ball Carriers</div>
+            <table style={TBL}><thead><tr>
+              <th style={TH}>#</th><th style={THC}>Touches</th><th style={THC}>Total Yds</th><th style={THC}>Avg</th><th style={THC}>Long</th>
+            </tr></thead><tbody>
+              {scout.topCarriers.map(c => (<tr key={c.num}>
+                <td style={{ ...TD, fontWeight: 600 }}>#{c.num}</td><td style={TDC}>{c.count}</td>
+                <td style={TDC}>{c.yards}</td><td style={TDC}>{c.avg}</td><td style={TDC}>{c.longest}</td>
+              </tr>))}
+            </tbody></table>
+          </>)}
+        </>)}
+        <div style={{ height: 40 }} />
+      </div>
+    </div>
+  );
+}
+
+// =================== SITUATIONS ===================
+function fieldZone(abs, side) {
+  if (abs == null) return null;
+  if (side === "offense") {
+    if (abs <= 20) return "Backed Up";
+    if (abs <= 79) return "Normal";
+    if (abs <= 96) return "Red Zone";
+    return "Goal Line";
+  }
+  // Defense — opponent running toward our EZ
+  if (abs >= 80) return "Backed Up"; // they're in their own territory
+  if (abs >= 21) return "Normal";
+  if (abs >= 4) return "Red Zone"; // they're near our EZ
+  return "Goal Line";
+}
+
+function downDistBucket(down, dist) {
+  if (down === 4) return "4th Down";
+  if (down === 3) {
+    if (dist <= 3) return "3rd & Short (1-3)";
+    if (dist <= 6) return "3rd & Medium (4-6)";
+    return "3rd & Long (7+)";
+  }
+  return null;
+}
+
+function scoreStateBucket(usScore, themScore) {
+  if (usScore == null || themScore == null) return null;
+  const diff = usScore - themScore;
+  if (diff >= 8) return "Leading 8+";
+  if (diff >= 1) return "Leading 1-7";
+  if (diff === 0) return "Tied";
+  if (diff >= -7) return "Trailing 1-7";
+  return "Trailing 8+";
+}
+
+function timeBucket(quarter, clockStr) {
+  if (!clockStr) return null;
+  const parts = clockStr.split(":");
+  const min = parseInt(parts[0], 10) || 0;
+  const sec = parseInt(parts[1], 10) || 0;
+  const totalSec = min * 60 + sec;
+  if ((quarter === 2 || quarter === 4) && totalSec <= 120) return "Two-Minute";
+  if (totalSec < 180) return "Late (< 3:00)";
+  if (totalSec <= 360) return "Mid (3:00–6:00)";
+  return "Early (> 6:00)";
+}
+
+function sitSummary(plays) {
+  if (!plays.length) return null;
+  const total = plays.length;
+  const runs = plays.filter(p => p.playType === "Run").length;
+  const passes = plays.filter(p => p.playType === "Pass").length;
+  const yards = plays.reduce((s, p) => s + (p.yards || 0), 0);
+  const avg = (yards / total).toFixed(1);
+  const playCounts = {};
+  plays.forEach(p => { if (p.play) playCounts[p.play] = (playCounts[p.play] || 0) + 1; });
+  const topPlay = Object.entries(playCounts).sort((a, b) => b[1] - a[1])[0];
+  return { total, runs, passes, yards, avg, topPlay: topPlay ? topPlay[0] : "—" };
+}
+
+function SitRow({ label, plays }) {
+  const s = sitSummary(plays);
+  if (!s) return null;
+  return (
+    <div style={{ padding: "10px 0", borderBottom: "1px solid #1d2530" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+        <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 14 }}>{label}</span>
+        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, color: "#f5c518", fontWeight: 700 }}>{s.avg} yds</span>
+      </div>
+      <div style={{ fontSize: 12, color: "#7a8699" }}>
+        {s.total} plays · {s.runs}R/{s.passes}P · top: {s.topPlay}
+      </div>
+    </div>
+  );
+}
+
+function SitSection({ title, buckets, plays, bucketFn }) {
+  const groups = {};
+  plays.forEach(p => {
+    const b = bucketFn(p);
+    if (b) (groups[b] ??= []).push(p);
+  });
+  const ordered = buckets.filter(b => groups[b]);
+  if (ordered.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 26 }}>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 8 }}>{title}</div>
+      <div style={{ background: "#11161f", borderRadius: 12, padding: "4px 14px", border: "1px solid #1d2530" }}>
+        {ordered.map(b => <SitRow key={b} label={b} plays={groups[b]} />)}
+      </div>
+    </div>
+  );
+}
+
+function SituationsTab({ plays, drives, side, fpDisplayMode, driveOutcomes }) {
+  // Only non-penalty, non-punt plays
+  const filtered = plays.filter(p => p.type !== "penalty" && p.type !== "punt");
+
+  // Build driveNumber → drive context map
+  const driveMap = {};
+  drives.forEach(d => { driveMap[d.driveNumber] = d; });
+
+  // Attach drive context to each play
+  const withCtx = filtered.map(p => {
+    const d = driveMap[p.driveNumber];
+    return { ...p, _quarter: d?.quarter, _clock: d?.clock, _usScore: d?.usScore, _themScore: d?.themScore, _driveOutcome: d?.outcome ?? null };
+  });
+
+  const hasAnyContext = withCtx.some(p => p._quarter != null);
+
+  if (!hasAnyContext) {
+    return (
+      <div style={{ background: "#11161f", borderRadius: 12, padding: 20, border: "1px solid #1d2530", textAlign: "center", color: "#7a8699", fontSize: 14, lineHeight: 1.6 }}>
+        Add quarter, score, and clock to your drives to see situational tendencies.
+        <br /><span style={{ fontSize: 12, color: "#4a5568", marginTop: 6, display: "block" }}>Tap "New Drive" and fill in the fields at the top of the panel.</span>
+      </div>
+    );
+  }
+
+  const ctxPlays = withCtx.filter(p => p._quarter != null);
+  const noCtxCount = filtered.length - ctxPlays.length;
+
+  return (
+    <>
+      {noCtxCount > 0 && <div style={{ fontSize: 12, color: "#4a5568", marginBottom: 16 }}>{noCtxCount} play{noCtxCount > 1 ? "s" : ""} excluded (no drive context)</div>}
+
+      <SitSection
+        title="By Quarter"
+        buckets={[1, 2, 3, 4, "OT"].map(String)}
+        plays={ctxPlays}
+        bucketFn={p => p._quarter != null ? String(p._quarter) : null}
+      />
+
+      <SitSection
+        title="By Down & Distance"
+        buckets={["3rd & Short (1-3)", "3rd & Medium (4-6)", "3rd & Long (7+)", "4th Down"]}
+        plays={ctxPlays}
+        bucketFn={p => downDistBucket(p.down, p.distance)}
+      />
+
+      <SitSection
+        title="By Field Zone"
+        buckets={["Goal Line", "Red Zone", "Normal", "Backed Up"]}
+        plays={ctxPlays}
+        bucketFn={p => fieldZone(p.fieldPos, side)}
+      />
+
+      <SitSection
+        title="By Score State"
+        buckets={["Leading 8+", "Leading 1-7", "Tied", "Trailing 1-7", "Trailing 8+"]}
+        plays={ctxPlays}
+        bucketFn={p => scoreStateBucket(p._usScore, p._themScore)}
+      />
+
+      <SitSection
+        title="By Time"
+        buckets={["Early (> 6:00)", "Mid (3:00–6:00)", "Late (< 3:00)", "Two-Minute"]}
+        plays={ctxPlays}
+        bucketFn={p => timeBucket(p._quarter, p._clock)}
+      />
+
+      {(driveOutcomes || []).length > 0 && (
+        <SitSection
+          title="By Drive Outcome"
+          buckets={driveOutcomes}
+          plays={ctxPlays}
+          bucketFn={p => p._driveOutcome || null}
+        />
+      )}
+    </>
+  );
+}
+
 function CarrierBreakdown({ data }) {
   const rows = Object.entries(data).sort((a, b) => b[1].yards - a[1].yards);
   if (rows.length === 0) return null;
@@ -1804,6 +3650,38 @@ function CarrierBreakdown({ data }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function PuntBreakdown({ plays }) {
+  const punts = plays.filter(p => p.type === "punt");
+  if (punts.length === 0) return null;
+  const total = punts.length;
+  const avgDist = (punts.reduce((s, p) => s + (p.puntDist || 0), 0) / total).toFixed(1);
+  const avgReturn = (punts.reduce((s, p) => s + (p.puntReturn || 0), 0) / total).toFixed(1);
+  const avgNet = (punts.reduce((s, p) => s + (p.puntNet || 0), 0) / total).toFixed(1);
+  const touchbacks = punts.filter(p => p.puntResult === "Touchback").length;
+  const fairCatches = punts.filter(p => p.puntResult === "Fair Catch").length;
+  const blocked = punts.filter(p => p.puntResult === "Blocked").length;
+  const bsRow = (lbl, val) => (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #1d2530" }}>
+      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 1, textTransform: "uppercase", color: "#7a8699" }}>{lbl}</span>
+      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, color: "#f4f4f0" }}>{val}</span>
+    </div>
+  );
+  return (
+    <div style={{ marginBottom: 26 }}>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 14, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 12 }}>Punting</div>
+      <div style={{ background: "#11161f", border: "1px solid #1d2530", borderRadius: 12, padding: "14px 16px" }}>
+        {bsRow("Punts", total)}
+        {bsRow("Avg Distance", `${avgDist} yds`)}
+        {bsRow("Avg Return Allowed", `${avgReturn} yds`)}
+        {bsRow("Avg Net", `${avgNet} yds`)}
+        {touchbacks > 0 && bsRow("Touchbacks", touchbacks)}
+        {fairCatches > 0 && bsRow("Fair Catches", fairCatches)}
+        {blocked > 0 && bsRow("Blocked", blocked)}
+      </div>
     </div>
   );
 }

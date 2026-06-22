@@ -751,10 +751,49 @@ function MultiGameReport({ games, onBack }) {
 }
 
 // =================== GAMES LIST ===================
+function seasonYear(dateStr) {
+  const d = new Date(dateStr);
+  const month = d.getMonth() + 1; // 1–12
+  const year = d.getFullYear();
+  return month >= 8 ? year : year - 1;
+}
+function currentSeasonYear() {
+  const now = new Date();
+  const month = now.getMonth() + 1;
+  const year = now.getFullYear();
+  return month >= 8 ? year : year - 1;
+}
+
 function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSignOut, onEditPlaybook, onViewStaff, onViewReports, isHeadCoach, canEditPlaybook, profile }) {
   const [showNew, setShowNew] = useState(false);
   const [label, setLabel] = useState("");
   const [confirmDel, setConfirmDel] = useState(null);
+
+  const curSy = currentSeasonYear();
+
+  const [openSeasons, setOpenSeasons] = useState(() => {
+    if (typeof window === "undefined") return new Set([curSy]);
+    try {
+      const saved = localStorage.getItem("sideline_open_seasons");
+      if (saved) return new Set(JSON.parse(saved));
+    } catch {}
+    return new Set([curSy]);
+  });
+
+  function toggleSeason(sy) {
+    setOpenSeasons(prev => {
+      const next = new Set(prev);
+      if (next.has(sy)) next.delete(sy); else next.add(sy);
+      try { localStorage.setItem("sideline_open_seasons", JSON.stringify([...next])); } catch {}
+      return next;
+    });
+  }
+
+  const seasonGroups = useMemo(() => {
+    const m = {};
+    index.forEach(g => { const sy = seasonYear(g.created_at); (m[sy] ??= []).push(g); });
+    return Object.entries(m).map(([sy, games]) => ({ sy: Number(sy), games })).sort((a, b) => b.sy - a.sy);
+  }, [index]);
 
   return (
     <Shell
@@ -800,22 +839,57 @@ function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSi
 
         {loading ? <div style={{ color: "#4a5568", textAlign: "center", padding: 40 }}>Loading…</div> :
           index.length === 0 ? <div style={{ color: "#4a5568", textAlign: "center", padding: 40, fontSize: 15 }}>No games yet.</div> :
-          index.map((g) => (
-            <div key={g.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", borderRadius: 12, padding: "14px 16px", marginBottom: 8, border: "1px solid #1d2530" }}>
-              <button onClick={() => onOpen(g.id)} style={{ flex: 1, textAlign: "left", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
-                <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17, color: "#f4f4f0" }}>{g.label}</div>
-                <div style={{ fontSize: 12, color: "#7a8699", marginTop: 2 }}>{new Date(g.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</div>
-              </button>
-              {isHeadCoach && (confirmDel === g.id ? (
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button onClick={() => { onDelete(g.id); setConfirmDel(null); }} style={{ ...tinyBtn, background: "#ff5252", color: "#fff" }}>Delete</button>
-                  <button onClick={() => setConfirmDel(null)} style={{ ...tinyBtn, background: "#2a3543", color: "#c4cdda" }}>No</button>
+          seasonGroups.map(({ sy, games }) => {
+            const isOpen = openSeasons.has(sy);
+            const isCurrent = sy === curSy;
+            return (
+              <div key={sy} style={{ marginBottom: 10 }}>
+                {/* Season header */}
+                <div
+                  onClick={() => toggleSeason(sy)}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    background: "#141a24", border: `1px solid ${isCurrent ? "#f5c518" : "#2a3543"}`,
+                    borderRadius: isOpen ? "10px 10px 0 0" : 10,
+                    padding: "11px 14px", cursor: "pointer", userSelect: "none",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontFamily: FONT_DISPLAY, fontSize: 15, fontWeight: 700, letterSpacing: 2, textTransform: "uppercase", color: isCurrent ? "#f5c518" : "#c4cdda" }}>
+                      {sy} Season
+                    </span>
+                    <span style={{ fontFamily: FONT_DISPLAY, fontSize: 12, color: "#4a5568", letterSpacing: 1 }}>
+                      {games.length} game{games.length !== 1 ? "s" : ""}
+                    </span>
+                  </div>
+                  <span style={{ color: "#7a8699", fontSize: 13 }}>{isOpen ? "▲" : "▼"}</span>
                 </div>
-              ) : (
-                <button onClick={() => setConfirmDel(g.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer" }}>×</button>
-              ))}
-            </div>
-          ))}
+
+                {/* Game rows */}
+                {isOpen && (
+                  <div style={{ border: `1px solid ${isCurrent ? "#f5c518" : "#2a3543"}`, borderTop: "none", borderRadius: "0 0 10px 10px", overflow: "hidden" }}>
+                    {games.map((g, gi) => (
+                      <div key={g.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", padding: "13px 14px", borderTop: gi > 0 ? "1px solid #1d2530" : "none" }}>
+                        <button onClick={() => onOpen(g.id)} style={{ flex: 1, textAlign: "left", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+                          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17, color: "#f4f4f0" }}>{g.label}</div>
+                          <div style={{ fontSize: 12, color: "#7a8699", marginTop: 2 }}>{new Date(g.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</div>
+                        </button>
+                        {isHeadCoach && (confirmDel === g.id ? (
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button onClick={() => { onDelete(g.id); setConfirmDel(null); }} style={{ ...tinyBtn, background: "#ff5252", color: "#fff" }}>Delete</button>
+                            <button onClick={() => setConfirmDel(null)} style={{ ...tinyBtn, background: "#2a3543", color: "#c4cdda" }}>No</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setConfirmDel(g.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer" }}>×</button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        }
       </div>
     </Shell>
   );

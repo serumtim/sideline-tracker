@@ -186,7 +186,7 @@ export default function PlayTracker() {
     try {
       const { data } = await supabase
         .from("games")
-        .select("id, label, created_at")
+        .select("id, label, created_at, scheduled_date, week_number, home_away, opponent, status")
         .order("created_at", { ascending: false });
       setGamesIndex(data || []);
     } catch { setGamesIndex([]); }
@@ -268,16 +268,27 @@ export default function PlayTracker() {
     return () => { supabase.removeChannel(channel); };
   }, [user?.id, profile?.role, profile?.team_id]);
 
-  async function createGame(label) {
+  async function createGame({ opponent, scheduledDate, weekNumber, homeAway, startNow }) {
     if (!isHeadCoach) return;
+    const prefix = homeAway === "away" ? "@ " : "vs ";
+    const label = opponent ? `${prefix}${opponent}` : "Untitled Game";
+    const status = startNow ? "in_progress" : "scheduled";
     const { data, error } = await supabase
       .from("games")
-      .insert({ label: label.trim() || "Untitled Game", offensive_plays: [], defensive_plays: [], user_id: user.id })
-      .select("id, label, created_at")
+      .insert({
+        label: label.trim(),
+        offensive_plays: [], defensive_plays: [], user_id: user.id,
+        scheduled_date: scheduledDate || new Date().toISOString().slice(0, 10),
+        week_number: weekNumber || null,
+        home_away: homeAway || "home",
+        opponent: opponent || null,
+        status,
+      })
+      .select("id, label, created_at, scheduled_date, week_number, home_away, opponent, status")
       .single();
     if (error || !data) { console.error("createGame failed:", error?.message); return; }
     setGamesIndex((prev) => [data, ...prev]);
-    setActiveId(data.id); setScreen("game");
+    if (startNow) { setActiveId(data.id); setScreen("game"); }
   }
 
   async function deleteGame(id) {
@@ -319,6 +330,7 @@ export default function PlayTracker() {
       index={gamesIndex} loading={loadingIndex} onRefresh={loadIndex}
       onOpen={(id) => { setActiveId(id); setScreen("game"); }}
       onCreate={createGame} onDelete={deleteGame}
+      onUpdateGame={(id, updates) => setGamesIndex(prev => prev.map(g => g.id === id ? {...g, ...updates} : g))}
       onSignOut={signOut}
       isHeadCoach={isHeadCoach}
       canEditPlaybook={canEditPlaybook}
@@ -331,7 +343,11 @@ export default function PlayTracker() {
 
   const active = gamesIndex.find((g) => g.id === activeId);
   return (
-    <Game id={activeId} label={active?.label || "Game"} gameDate={active?.created_at || null} playbook={playbook} layout={layout}
+    <Game id={activeId} label={active?.label || "Game"}
+      gameDate={active?.scheduled_date || active?.created_at || null}
+      gameStatus={active?.status || "complete"}
+      onStatusChange={(newStatus) => setGamesIndex(prev => prev.map(g => g.id === activeId ? {...g, status: newStatus} : g))}
+      playbook={playbook} layout={layout}
       isHeadCoach={isHeadCoach}
       onBack={() => { setScreen("games"); loadIndex(); }} />
   );
@@ -764,10 +780,17 @@ function currentSeasonYear() {
   return month >= 8 ? year : year - 1;
 }
 
-function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSignOut, onEditPlaybook, onViewStaff, onViewReports, isHeadCoach, canEditPlaybook, profile }) {
+function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onUpdateGame, onSignOut, onEditPlaybook, onViewStaff, onViewReports, isHeadCoach, canEditPlaybook, profile }) {
   const [showNew, setShowNew] = useState(false);
-  const [label, setLabel] = useState("");
+  const [newOpponent, setNewOpponent] = useState("");
+  const [newDate, setNewDate] = useState(() => { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`; });
+  const [newWeek, setNewWeek] = useState("");
+  const [newHomeAway, setNewHomeAway] = useState("home");
+  const [newStartNow, setNewStartNow] = useState(false);
   const [confirmDel, setConfirmDel] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editFields, setEditFields] = useState({});
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const curSy = currentSeasonYear();
 
@@ -791,9 +814,124 @@ function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSi
 
   const seasonGroups = useMemo(() => {
     const m = {};
-    index.forEach(g => { const sy = seasonYear(g.created_at); (m[sy] ??= []).push(g); });
-    return Object.entries(m).map(([sy, games]) => ({ sy: Number(sy), games })).sort((a, b) => b.sy - a.sy);
+    index.forEach(g => {
+      const sy = seasonYear(g.scheduled_date || g.created_at);
+      (m[sy] ??= []).push(g);
+    });
+    return Object.entries(m).map(([sy, games]) => {
+      const sd = g => g.scheduled_date || g.created_at || "";
+      const upcoming = games.filter(g => (g.status || "complete") === "scheduled").sort((a, b) => sd(a) < sd(b) ? -1 : 1);
+      const inProgress = games.filter(g => (g.status || "complete") === "in_progress");
+      const completed = games.filter(g => (g.status || "complete") === "complete").sort((a, b) => sd(a) > sd(b) ? -1 : 1);
+      return { sy: Number(sy), upcoming, inProgress, completed };
+    }).sort((a, b) => b.sy - a.sy);
   }, [index]);
+
+  function todayStr() { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`; }
+
+  function handleCreate() {
+    if (!newOpponent.trim()) return;
+    onCreate({ opponent: newOpponent.trim(), scheduledDate: newDate, weekNumber: newWeek ? parseInt(newWeek) : null, homeAway: newHomeAway, startNow: newStartNow });
+    setNewOpponent(""); setNewDate(todayStr()); setNewWeek(""); setNewHomeAway("home"); setNewStartNow(false); setShowNew(false);
+  }
+
+  function startEdit(g) {
+    setEditingId(g.id);
+    setEditFields({ opponent: g.opponent || g.label || "", scheduledDate: g.scheduled_date || todayStr(), weekNumber: g.week_number ? String(g.week_number) : "", homeAway: g.home_away || "home" });
+  }
+
+  async function saveEdit() {
+    if (!editFields.opponent?.trim()) return;
+    setSavingEdit(true);
+    const prefix = editFields.homeAway === "away" ? "@ " : "vs ";
+    const newLabel = `${prefix}${editFields.opponent.trim()}`;
+    const updates = { opponent: editFields.opponent.trim(), label: newLabel, scheduled_date: editFields.scheduledDate, week_number: editFields.weekNumber ? parseInt(editFields.weekNumber) : null, home_away: editFields.homeAway };
+    const { error } = await supabase.from("games").update(updates).eq("id", editingId);
+    if (!error && onUpdateGame) onUpdateGame(editingId, updates);
+    setSavingEdit(false);
+    setEditingId(null);
+  }
+
+  function fmtDate(g) {
+    const d = g.scheduled_date || g.created_at;
+    if (!d) return "";
+    const dt = d.length === 10 ? new Date(d + "T12:00:00") : new Date(d);
+    return dt.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  }
+
+  function renderGameRow(g, statusLabel, isFirst) {
+    if (editingId === g.id) {
+      return (
+        <div key={g.id} style={{ background: "#141a24", padding: "14px 14px", borderTop: "1px solid #1d2530" }}>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 10 }}>Edit Game</div>
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", marginBottom: 5 }}>Opponent</div>
+            <input autoFocus value={editFields.opponent} onChange={e => setEditFields(f => ({...f, opponent: e.target.value}))} onKeyDown={e => e.key === "Enter" && saveEdit()} style={inputStyle} />
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <div style={{ flex: 2 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", marginBottom: 5 }}>Date</div>
+              <input type="date" value={editFields.scheduledDate} onChange={e => setEditFields(f => ({...f, scheduledDate: e.target.value}))} style={inputStyle} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", marginBottom: 5 }}>Week</div>
+              <input type="number" min="1" max="25" value={editFields.weekNumber} onChange={e => setEditFields(f => ({...f, weekNumber: e.target.value}))} placeholder="—" style={inputStyle} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", marginBottom: 5 }}>Home / Away</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {["home", "away"].map(ha => (
+                <button key={ha} onClick={() => setEditFields(f => ({...f, homeAway: ha}))} style={{ flex: 1, padding: "10px", borderRadius: 8, border: "none", background: editFields.homeAway === ha ? "#f5c518" : "#1d2530", color: editFields.homeAway === ha ? "#0a0e14" : "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 700, cursor: "pointer", textTransform: "capitalize" }}>{ha}</button>
+              ))}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={saveEdit} disabled={savingEdit} style={{ flex: 1, ...solidBtn }}>{savingEdit ? "Saving…" : "Save"}</button>
+            <button onClick={() => setEditingId(null)} style={{ flex: 1, ...ghostBtn }}>Cancel</button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div key={g.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "#11161f", padding: "12px 14px", borderTop: isFirst ? "none" : "1px solid #1d2530" }}>
+        {g.week_number != null && (
+          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 10, color: "#f5c518", background: "#1d2530", borderRadius: 4, padding: "2px 6px", letterSpacing: 1, textTransform: "uppercase", flexShrink: 0 }}>WK {g.week_number}</span>
+        )}
+        <button onClick={() => onOpen(g.id)} style={{ flex: 1, textAlign: "left", background: "none", border: "none", cursor: "pointer", padding: 0, minWidth: 0 }}>
+          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 16, color: "#f4f4f0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.label}</div>
+          <div style={{ fontSize: 12, color: "#7a8699", marginTop: 2, display: "flex", alignItems: "center", gap: 5 }}>
+            <span>{fmtDate(g)}</span>
+            {statusLabel === "upcoming" && <span style={{ color: "#a8b3c4" }}>· Upcoming</span>}
+            {statusLabel === "live" && <span style={{ color: "#3ddc84" }}>· ● Live</span>}
+          </div>
+        </button>
+        {isHeadCoach && statusLabel === "upcoming" && (
+          <button onClick={() => startEdit(g)} title="Edit" style={{ background: "none", border: "none", color: "#4a5568", fontSize: 15, cursor: "pointer", padding: "4px 6px", flexShrink: 0 }}>✎</button>
+        )}
+        {isHeadCoach && (confirmDel === g.id ? (
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <button onClick={() => { onDelete(g.id); setConfirmDel(null); }} style={{ ...tinyBtn, background: "#ff5252", color: "#fff" }}>Delete</button>
+            <button onClick={() => setConfirmDel(null)} style={{ ...tinyBtn, background: "#2a3543", color: "#c4cdda" }}>No</button>
+          </div>
+        ) : (
+          <button onClick={() => setConfirmDel(g.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer", flexShrink: 0 }}>×</button>
+        ))}
+      </div>
+    );
+  }
+
+  function renderSubSection(label, games, statusLabel) {
+    if (!games.length) return null;
+    return (
+      <div>
+        <div style={{ padding: "5px 14px", background: "#0c1018", borderTop: "1px solid #1d2530" }}>
+          <span style={{ fontFamily: FONT_DISPLAY, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", color: "#4a5568" }}>{label}</span>
+        </div>
+        {games.map((g, gi) => renderGameRow(g, statusLabel, gi === 0))}
+      </div>
+    );
+  }
 
   return (
     <Shell
@@ -821,13 +959,46 @@ function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSi
 
         {showNew && (
           <div style={{ background: "#11161f", borderRadius: 12, padding: 16, marginBottom: 16, border: "1px solid #2a3543" }}>
-            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 10 }}>Who are we playing?</div>
-            <input autoFocus value={label} onChange={(e) => setLabel(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") { onCreate(label); setLabel(""); setShowNew(false); } }}
-              placeholder="e.g. vs Central — Week 4" style={inputStyle} />
-            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-              <button onClick={() => { onCreate(label); setLabel(""); setShowNew(false); }} style={{ flex: 1, ...solidBtn }}>Start</button>
-              <button onClick={() => { setShowNew(false); setLabel(""); }} style={{ flex: 1, ...ghostBtn }}>Cancel</button>
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, textTransform: "uppercase", color: "#7a8699", marginBottom: 14 }}>New Game</div>
+
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", marginBottom: 6 }}>Opponent *</div>
+              <input autoFocus value={newOpponent} onChange={e => setNewOpponent(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && handleCreate()}
+                placeholder="e.g. Central High School" style={inputStyle} />
+            </div>
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <div style={{ flex: 2 }}>
+                <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", marginBottom: 6 }}>Date</div>
+                <input type="date" value={newDate} onChange={e => setNewDate(e.target.value)} style={inputStyle} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", marginBottom: 6 }}>Week</div>
+                <input type="number" min="1" max="25" value={newWeek} onChange={e => setNewWeek(e.target.value)} placeholder="—" style={inputStyle} />
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", marginBottom: 6 }}>Home / Away</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {["home", "away"].map(ha => (
+                  <button key={ha} onClick={() => setNewHomeAway(ha)} style={{ flex: 1, padding: "12px", borderRadius: 8, border: "none", background: newHomeAway === ha ? "#f5c518" : "#1d2530", color: newHomeAway === ha ? "#0a0e14" : "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 700, cursor: "pointer", textTransform: "capitalize" }}>{ha}</button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#4a5568", marginBottom: 6 }}>Start</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setNewStartNow(false)} style={{ flex: 1, padding: "12px", borderRadius: 8, border: "none", background: !newStartNow ? "#f5c518" : "#1d2530", color: !newStartNow ? "#0a0e14" : "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Schedule</button>
+                <button onClick={() => setNewStartNow(true)} style={{ flex: 1, padding: "12px", borderRadius: 8, border: "none", background: newStartNow ? "#f5c518" : "#1d2530", color: newStartNow ? "#0a0e14" : "#7a8699", fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Start Now</button>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={handleCreate} style={{ flex: 1, ...solidBtn }}>{newStartNow ? "Start Game" : "Schedule"}</button>
+              <button onClick={() => { setShowNew(false); setNewOpponent(""); setNewDate(todayStr()); setNewWeek(""); setNewHomeAway("home"); setNewStartNow(false); }} style={{ flex: 1, ...ghostBtn }}>Cancel</button>
             </div>
           </div>
         )}
@@ -839,12 +1010,12 @@ function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSi
 
         {loading ? <div style={{ color: "#4a5568", textAlign: "center", padding: 40 }}>Loading…</div> :
           index.length === 0 ? <div style={{ color: "#4a5568", textAlign: "center", padding: 40, fontSize: 15 }}>No games yet.</div> :
-          seasonGroups.map(({ sy, games }) => {
+          seasonGroups.map(({ sy, upcoming, inProgress, completed }) => {
             const isOpen = openSeasons.has(sy);
             const isCurrent = sy === curSy;
+            const total = upcoming.length + inProgress.length + completed.length;
             return (
               <div key={sy} style={{ marginBottom: 10 }}>
-                {/* Season header */}
                 <div
                   onClick={() => toggleSeason(sy)}
                   style={{
@@ -859,31 +1030,17 @@ function GamesList({ index, loading, onRefresh, onOpen, onCreate, onDelete, onSi
                       {sy} Season
                     </span>
                     <span style={{ fontFamily: FONT_DISPLAY, fontSize: 12, color: "#4a5568", letterSpacing: 1 }}>
-                      {games.length} game{games.length !== 1 ? "s" : ""}
+                      {total} game{total !== 1 ? "s" : ""}
                     </span>
                   </div>
                   <span style={{ color: "#7a8699", fontSize: 13 }}>{isOpen ? "▲" : "▼"}</span>
                 </div>
 
-                {/* Game rows */}
                 {isOpen && (
                   <div style={{ border: `1px solid ${isCurrent ? "#f5c518" : "#2a3543"}`, borderTop: "none", borderRadius: "0 0 10px 10px", overflow: "hidden" }}>
-                    {games.map((g, gi) => (
-                      <div key={g.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#11161f", padding: "13px 14px", borderTop: gi > 0 ? "1px solid #1d2530" : "none" }}>
-                        <button onClick={() => onOpen(g.id)} style={{ flex: 1, textAlign: "left", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
-                          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17, color: "#f4f4f0" }}>{g.label}</div>
-                          <div style={{ fontSize: 12, color: "#7a8699", marginTop: 2 }}>{new Date(g.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</div>
-                        </button>
-                        {isHeadCoach && (confirmDel === g.id ? (
-                          <div style={{ display: "flex", gap: 6 }}>
-                            <button onClick={() => { onDelete(g.id); setConfirmDel(null); }} style={{ ...tinyBtn, background: "#ff5252", color: "#fff" }}>Delete</button>
-                            <button onClick={() => setConfirmDel(null)} style={{ ...tinyBtn, background: "#2a3543", color: "#c4cdda" }}>No</button>
-                          </div>
-                        ) : (
-                          <button onClick={() => setConfirmDel(g.id)} style={{ background: "none", border: "none", color: "#4a5568", fontSize: 20, cursor: "pointer" }}>×</button>
-                        ))}
-                      </div>
-                    ))}
+                    {renderSubSection("Upcoming", upcoming, "upcoming")}
+                    {renderSubSection("In Progress", inProgress, "live")}
+                    {renderSubSection("Completed", completed, null)}
                   </div>
                 )}
               </div>
@@ -1169,7 +1326,7 @@ function PlaybookCategory({ label, items, onRemove, onAdd }) {
 }
 
 // =================== SINGLE GAME ===================
-function Game({ id, label, gameDate, playbook, layout, isHeadCoach, onBack }) {
+function Game({ id, label, gameDate, gameStatus, onStatusChange, playbook, layout, isHeadCoach, onBack }) {
   const { personnel: PERSONNEL, formations: FORMATIONS, formTags: FORM_TAGS,
     positions: POSITIONS, rpoTags: RPO_TAGS, runPlays: RUN_PLAYS, passPlays: PASS_PLAYS } = playbook;
   const sec = playbook.sections ?? DEFAULT_PLAYBOOK.sections;
@@ -1469,6 +1626,11 @@ function Game({ id, label, gameDate, playbook, layout, isHeadCoach, onBack }) {
 
   function toggle(list, setList, val) { setList(list.includes(val) ? list.filter((x) => x !== val) : [...list, val]); }
 
+  async function handleMarkComplete() {
+    await supabase.from("games").update({ status: "complete" }).eq("id", id);
+    if (onStatusChange) onStatusChange("complete");
+  }
+
   function tagDriveOutcome(driveNum, outcome) {
     const newDrives = scoreRef.current.drives.map(d => d.driveNumber === driveNum ? { ...d, outcome } : d);
     setDrives(newDrives);
@@ -1510,6 +1672,9 @@ function Game({ id, label, gameDate, playbook, layout, isHeadCoach, onBack }) {
     };
     const next = [newPlay, ...offPlays];
     setOffPlays(next); persist(next, "offense");
+    if (gameStatus === "scheduled" && onStatusChange) {
+      supabase.from("games").update({ status: "in_progress" }).eq("id", id).then(() => onStatusChange("in_progress"));
+    }
     const turnover = gainType === "TD" || gainType === "FG" || gainType === "INT" || gainType === "Safety" || (gainType === "Fumble" && fumbleRecovery === "Defense");
     if (turnover) {
       setDown(1); setDistance(10); setNeedNewDrive(true);
@@ -1559,6 +1724,9 @@ function Game({ id, label, gameDate, playbook, layout, isHeadCoach, onBack }) {
     };
     const next = [newPlay, ...defPlays];
     setDefPlays(next); persist(next, "defense");
+    if (gameStatus === "scheduled" && onStatusChange) {
+      supabase.from("games").update({ status: "in_progress" }).eq("id", id).then(() => onStatusChange("in_progress"));
+    }
     const turnover = defGainType === "TD" || defGainType === "INT" || defGainType === "Safety" || defGainType === "Fumble";
     if (turnover) {
       setDown(1); setDistance(10); setNeedNewDrive(true);
@@ -1752,7 +1920,12 @@ function Game({ id, label, gameDate, playbook, layout, isHeadCoach, onBack }) {
   return (
     <Shell subtitle={label} onBack={onBack}
       right={
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {gameStatus !== "complete" && (
+            <button onClick={handleMarkComplete} style={{ background: "#1d2530", border: "1px solid #2a3543", borderRadius: 8, padding: "5px 10px", color: "#3ddc84", fontSize: 11, cursor: "pointer", fontFamily: FONT_DISPLAY, letterSpacing: 1, textTransform: "uppercase" }}>
+              ✓ Final
+            </button>
+          )}
           <button onClick={() => setShowScoreEdit(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "#1d2530", border: "1px solid #2a3543", borderRadius: 10, padding: "6px 12px", cursor: "pointer" }}>
             <span style={{ fontFamily: FONT_DISPLAY, fontSize: 20, fontWeight: 700, color: "#f5c518", minWidth: 22, textAlign: "right" }}>{usScore}</span>
             <span style={{ color: "#4a5568", fontSize: 14 }}>–</span>
